@@ -13,7 +13,14 @@ import {
   hasUsableOAuthCreds,
   shouldPreferCredentialCandidate,
 } from "./credentialValidation";
+import { ClaudeSettingsManager } from "./claudeSettings";
+import { findProfileForEnv } from "./compat";
 import { CredentialsManager } from "./credentials";
+import {
+  promptCompatGroup,
+  runAddProviderWizard,
+  runEditProviderWizard,
+} from "./providerWizard";
 import { getAccountConfigDir } from "./isolatedConfig";
 import { TokenRefresher } from "./oauth";
 import { ProfileActivityRegistry } from "./profileActivity";
@@ -27,27 +34,30 @@ import { WarmupService } from "./warmup";
 export function activate(context: vscode.ExtensionContext): void {
   const store = new AccountStore(context);
   const credentials = new CredentialsManager();
+  const claudeSettings = new ClaudeSettingsManager(credentials);
   const refresher = new TokenRefresher();
   const browserOAuth = new BrowserOAuthLogin();
   const profileActivity = new ProfileActivityRegistry(context);
-  const switchService = new SwitchService(store, credentials);
+  const switchService = new SwitchService(store, credentials, claudeSettings);
   const warmupService = new WarmupService(
     context,
     store,
     credentials,
+    claudeSettings,
     profileActivity
   );
   const accountWindowService = new AccountWindowService(
     context,
     store,
     credentials,
+    claudeSettings,
     profileActivity
   );
   const statusBar = new StatusBarController(store);
   const viewProvider = new AccountsViewProvider(context.extensionUri, store);
 
   const getInterval = () =>
-    vscode.workspace.getConfiguration("claudeSwitcher").get<number>("pollIntervalSeconds", 240);
+    vscode.workspace.getConfiguration("claudeProviderSwitcher").get<number>("pollIntervalSeconds", 240);
 
   const refreshUI = () => {
     statusBar.refresh();
@@ -120,7 +130,32 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /**
+   * Which provider profile the pinned env block selects, if any. A malformed settings.json is
+   * treated as "nothing pinned" rather than blocking startup.
+   */
+  const activeProviderProfileId = (): string | undefined => {
+    let env: Record<string, string>;
+    try {
+      env = claudeSettings.readEnv();
+    } catch {
+      return undefined;
+    }
+    return findProfileForEnv(store.list(), env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL)?.id;
+  };
+
   const synchronizeCurrentProfile = async () => {
+    // A pinned provider is the authority: subscription credentials are intentionally left in the
+    // file when switching to a provider, so reconciling from .credentials.json here would hand the
+    // active marker back to a subscription profile that Claude Code is not actually using.
+    const providerId = activeProviderProfileId();
+    if (providerId) {
+      await store.setActiveId(providerId);
+      // No rotating refresh token is in play, so this window owns no subscription profile.
+      profileActivity.setActiveProfile(undefined);
+      return;
+    }
+
     const fileCreds = credentials.readCurrent();
     if (!fileCreds) {
       profileActivity.setActiveProfile(store.getActiveId());
@@ -310,7 +345,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // --- Commands ---
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.addCurrentAccount", async () => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.addCurrentAccount", async () => {
       const res = await switchService.captureCurrent();
       vscode.window[res.ok ? "showInformationMessage" : "showWarningMessage"](res.message);
       if (res.ok) {
@@ -326,7 +361,62 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.switchAccount", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.addProviderProfile", async () => {
+      const profile = await runAddProviderWizard(store);
+      if (!profile) {
+        return;
+      }
+      refreshUI();
+      const choice = await vscode.window.showInformationMessage(
+        `Added "${profile.label}". Test the connection now?`,
+        "Test connection",
+        "Switch to it",
+        "Later"
+      );
+      if (choice === "Test connection") {
+        const res = await warmupService.sayHi(profile.id);
+        vscode.window[res.ok ? "showInformationMessage" : "showWarningMessage"](res.message);
+      } else if (choice === "Switch to it") {
+        await vscode.commands.executeCommand(
+          "claudeProviderSwitcher.switchAccount",
+          profile.id
+        );
+      }
+      refreshUI();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "claudeProviderSwitcher.editProviderProfile",
+      async (id?: string) => {
+        const targetId = id ?? (await pickAccount(store, "Edit API provider profile…"));
+        if (targetId && (await runEditProviderWizard(store, targetId))) {
+          refreshUI();
+          if (store.getActiveId() === targetId) {
+            vscode.window.showInformationMessage(
+              "Profile updated. Switch to it again (or reload) so Claude Code picks up the change."
+            );
+          }
+        }
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "claudeProviderSwitcher.setCompatGroup",
+      async (id?: string) => {
+        const targetId = id ?? (await pickAccount(store, "Conversation compatibility…"));
+        if (targetId && (await promptCompatGroup(store, targetId))) {
+          refreshUI();
+        }
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("claudeProviderSwitcher.switchAccount", async (id?: string) => {
       const targetId = id ?? (await pickAccount(store, "Switch to account…"));
       if (!targetId) {
         return;
@@ -372,7 +462,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.refreshUsage", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.refreshUsage", async (id?: string) => {
       if (id) {
         await poller.pollOne(id, true);
         refreshUI();
@@ -383,7 +473,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.sayHi", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.sayHi", async (id?: string) => {
       const targetIds = id ? [id] : await pickWarmupTargets(store);
       if (!targetIds || targetIds.length === 0) {
         return;
@@ -401,7 +491,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.openIndependentWindow", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.openIndependentWindow", async (id?: string) => {
       const targetIds = id ? [id] : await pickWindowTargets(store);
       if (!targetIds || targetIds.length === 0) {
         return;
@@ -415,11 +505,11 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.login", () => void openClaudeLogin())
+    vscode.commands.registerCommand("claudeProviderSwitcher.login", () => void openClaudeLogin())
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.browserLogin", async () => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.browserLogin", async () => {
       const result = await authorizeInBrowser();
       if (result.ok) {
         vscode.window.showInformationMessage(
@@ -435,7 +525,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.reauthorizeProfile", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.reauthorizeProfile", async (id?: string) => {
       const targetId = id ?? (await pickAccount(store, "Reauthorize profile..."));
       if (targetId) {
         await startProfileReauthorization(targetId);
@@ -445,7 +535,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "claudeSwitcher.completeProfileReauthorization",
+      "claudeProviderSwitcher.completeProfileReauthorization",
       async (id?: string) => {
         const targetId = id ?? (await pickAccount(store, "Complete profile reauthorization..."));
         if (!targetId) {
@@ -473,7 +563,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.removeAccount", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.removeAccount", async (id?: string) => {
       const targetId = id ?? (await pickAccount(store, "Remove account profile…"));
       if (!targetId) {
         return;
@@ -493,7 +583,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.renameAccount", async (id?: string) => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.renameAccount", async (id?: string) => {
       const targetId = id ?? (await pickAccount(store, "Rename profile…"));
       if (!targetId) {
         return;
@@ -512,7 +602,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.undoSwitch", async () => {
+    vscode.commands.registerCommand("claudeProviderSwitcher.undoSwitch", async () => {
       const res = await switchService.undoSwitch();
       profileActivity.setActiveProfile(store.getActiveId());
       vscode.window[res.ok ? "showInformationMessage" : "showWarningMessage"](res.message);
@@ -521,18 +611,18 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand("claudeSwitcher.openPanel", () => {
-      void vscode.commands.executeCommand("claudeSwitcher.accountsView.focus");
+    vscode.commands.registerCommand("claudeProviderSwitcher.openPanel", () => {
+      void vscode.commands.executeCommand("claudeProviderSwitcher.accountsView.focus");
     })
   );
 
   // React to interval setting changes.
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("claudeSwitcher.pollIntervalSeconds")) {
+      if (e.affectsConfiguration("claudeProviderSwitcher.pollIntervalSeconds")) {
         poller.restart();
       }
-      if (e.affectsConfiguration("claudeSwitcher.warnThresholdPercent")) {
+      if (e.affectsConfiguration("claudeProviderSwitcher.warnThresholdPercent")) {
         refreshUI();
       }
     })
@@ -562,13 +652,21 @@ async function pickAccount(store: AccountStore, title: string): Promise<string |
   }
 
   const items = accounts.map((p: AccountProfile) => {
+    const active = p.id === activeId;
+    if (p.kind === "api") {
+      return {
+        label: (active ? "$(check) " : "$(plug) ") + p.label,
+        description: [describeEndpoint(p), p.provider?.model].filter(Boolean).join("  ·  "),
+        id: p.id,
+      };
+    }
     const u = p.lastUsage;
     const parts: string[] = [];
     if (typeof u?.sessionPercent === "number") parts.push(`5h: ${u.sessionPercent}%`);
     if (typeof u?.weeklyPercent === "number") parts.push(`weekly: ${u.weeklyPercent}%`);
     if (u?.error) parts.push("⚠ usage error");
     return {
-      label: (p.id === activeId ? "$(check) " : "$(account) ") + p.label,
+      label: (active ? "$(check) " : "$(account) ") + p.label,
       description: [p.subscriptionType, parts.join("  ")].filter(Boolean).join("  ·  "),
       id: p.id,
     };
@@ -592,23 +690,27 @@ async function pickWarmupTargets(store: AccountStore): Promise<string[] | undefi
     return undefined;
   }
 
-  const inactive = accounts.filter((p) => p.id !== activeId);
+  // Only subscription profiles race Claude Code for a rotating refresh token. API-provider
+  // profiles have a static key, so testing the active one is harmless.
+  const selectable = accounts.filter((p) => p.kind === "api" || p.id !== activeId);
   const items: Array<{ label: string; description?: string; ids: string[] }> = [];
-  if (inactive.length > 1) {
+  if (selectable.length > 1) {
     items.push({
-      label: "$(run-all) Say Hi on all inactive accounts",
-      description: `${inactive.length} accounts`,
-      ids: inactive.map((p) => p.id),
+      label: "$(run-all) Run on all eligible profiles",
+      description: `${selectable.length} profiles`,
+      ids: selectable.map((p) => p.id),
     });
   }
   for (const p of accounts) {
+    const blocked = p.kind !== "api" && p.id === activeId;
     items.push({
-      label: (p.id === activeId ? "$(circle-slash) " : "$(comment) ") + p.label,
-      description:
-        p.id === activeId
-          ? "active account is skipped to avoid token races"
+      label: (blocked ? "$(circle-slash) " : p.kind === "api" ? "$(plug) " : "$(comment) ") + p.label,
+      description: blocked
+        ? "active account is skipped to avoid token races"
+        : p.kind === "api"
+          ? `test connection · ${describeEndpoint(p)}`
           : p.subscriptionType,
-      ids: p.id === activeId ? [] : [p.id],
+      ids: blocked ? [] : [p.id],
     });
   }
 
@@ -641,7 +743,12 @@ async function pickWindowTargets(store: AccountStore): Promise<string[] | undefi
   for (const p of accounts) {
     items.push({
       label: (p.id === activeId ? "$(check) " : "$(window) ") + p.label,
-      description: p.id === activeId ? "current account" : p.subscriptionType,
+      description:
+        p.id === activeId
+          ? "current profile"
+          : p.kind === "api"
+            ? describeEndpoint(p)
+            : p.subscriptionType,
       ids: [p.id],
     });
   }
@@ -652,6 +759,18 @@ async function pickWindowTargets(store: AccountStore): Promise<string[] | undefi
     matchOnDescription: true,
   });
   return picked?.ids;
+}
+
+function describeEndpoint(profile: AccountProfile): string {
+  const baseUrl = profile.provider?.baseUrl;
+  if (!baseUrl) {
+    return "no endpoint configured";
+  }
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
 }
 
 function profileHasIdentity(profile: AccountProfile): boolean {

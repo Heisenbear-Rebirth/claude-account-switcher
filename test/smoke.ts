@@ -8,6 +8,13 @@ import { AccountStore } from "../src/accountStore";
 import { buildBrowserAuthorizationUrl, parseBrowserTokenResponse } from "../src/browserOAuth";
 import { ProfileActivityRegistry } from "../src/profileActivity";
 import { SwitchService } from "../src/switchService";
+import { ClaudeSettingsManager } from "../src/claudeSettings";
+import { buildProviderEnv, keysToClear, managedKeysFor } from "../src/providerEnv";
+import { compatKey, findProfileForEnv, isCompatible, normalizeBaseUrl, OAUTH_COMPAT_KEY } from "../src/compat";
+import { readLastModel, sanitizeCwd, scanSessions } from "../src/sessionScan";
+import { shouldWarnOnSwitch } from "../src/sessionGuard";
+import { getPreset } from "../src/providerPresets";
+import { AccountProfile, ProviderConfig } from "../src/types";
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -477,7 +484,7 @@ async function runSwitchServiceTests(): Promise<void> {
     scopes: ["user:profile"],
   });
 
-  const service = new SwitchService(store, manager);
+  const service = new SwitchService(store, manager, new ClaudeSettingsManager(manager));
   const switchResult = await service.switchTo(profile.id);
   check(
     "incomplete profile switch requests reauthorization",
@@ -489,6 +496,271 @@ async function runSwitchServiceTests(): Promise<void> {
   );
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+
+
+// --- API provider support -------------------------------------------------
+
+function providerProfile(
+  over: Partial<ProviderConfig> = {},
+  extra: Partial<AccountProfile> = {}
+): AccountProfile {
+  return {
+    id: "p" + Math.random().toString(36).slice(2),
+    label: "test",
+    kind: "api",
+    addedAt: 0,
+    order: 0,
+    provider: {
+      baseUrl: "https://api.deepseek.com/anthropic",
+      authStyle: "authToken",
+      ...over,
+    },
+    ...extra,
+  };
+}
+
+function runProviderEnvTests(): void {
+  console.log("providerEnv:");
+
+  const authTokenEnv = buildProviderEnv(
+    {
+      baseUrl: "https://api.deepseek.com/anthropic",
+      authStyle: "authToken",
+      model: "deepseek-flash",
+    },
+    "sk-secret"
+  );
+  check("authToken style sets ANTHROPIC_AUTH_TOKEN", authTokenEnv.ANTHROPIC_AUTH_TOKEN === "sk-secret");
+  check("authToken style leaves ANTHROPIC_API_KEY unset", !("ANTHROPIC_API_KEY" in authTokenEnv));
+  check("base url is written", authTokenEnv.ANTHROPIC_BASE_URL === "https://api.deepseek.com/anthropic");
+  check("model is written", authTokenEnv.ANTHROPIC_MODEL === "deepseek-flash");
+
+  const apiKeyEnv = buildProviderEnv({ baseUrl: "https://example.com", authStyle: "apiKey" }, "sk-secret");
+  check("apiKey style sets ANTHROPIC_API_KEY", apiKeyEnv.ANTHROPIC_API_KEY === "sk-secret");
+  check("apiKey style leaves ANTHROPIC_AUTH_TOKEN unset", !("ANTHROPIC_AUTH_TOKEN" in apiKeyEnv));
+
+  // OpenRouter documents that ANTHROPIC_API_KEY must be present but empty.
+  const openrouter = getPreset("openrouter")!;
+  const orEnv = buildProviderEnv(
+    { baseUrl: openrouter.baseUrl, authStyle: "authToken", extraEnv: openrouter.extraEnv },
+    "sk-or-key"
+  );
+  check("preset extraEnv can pin an empty ANTHROPIC_API_KEY", orEnv.ANTHROPIC_API_KEY === "");
+  check("empty api key does not clobber the bearer token", orEnv.ANTHROPIC_AUTH_TOKEN === "sk-or-key");
+
+  // extraEnv must never be able to overwrite the credential we authenticate with.
+  const hostile = buildProviderEnv(
+    {
+      baseUrl: "https://example.com",
+      authStyle: "authToken",
+      extraEnv: { ANTHROPIC_AUTH_TOKEN: "hijacked", API_TIMEOUT_MS: "1000" },
+    },
+    "real-key"
+  );
+  check("core vars win over extraEnv", hostile.ANTHROPIC_AUTH_TOKEN === "real-key");
+  check("unrelated extraEnv survives", hostile.API_TIMEOUT_MS === "1000");
+
+  const cleared = keysToClear(["ANTHROPIC_BASE_URL", "API_TIMEOUT_MS"], { ANTHROPIC_BASE_URL: "x" });
+  check("keysToClear keeps keys the new env sets", !cleared.includes("ANTHROPIC_BASE_URL"));
+  check("keysToClear drops a previously managed extra key", cleared.includes("API_TIMEOUT_MS"));
+  check("keysToClear always covers the core set", cleared.includes("ANTHROPIC_AUTH_TOKEN"));
+
+  const keys = managedKeysFor(providerProfile({ extraEnv: { API_TIMEOUT_MS: "1" } }));
+  check("managedKeysFor includes profile extraEnv", keys.includes("API_TIMEOUT_MS"));
+}
+
+function runClaudeSettingsTests(): void {
+  console.log("ClaudeSettingsManager:");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-settings-"));
+  process.env.TEST_CRED_PATH = path.join(dir, ".credentials.json");
+  const settings = new ClaudeSettingsManager(new CredentialsManager());
+  const file = path.join(dir, "settings.json");
+
+  // A realistic pre-existing file: user hooks/permissions plus a hand-written env entry.
+  fs.writeFileSync(
+    file,
+    JSON.stringify({
+      permissions: { allow: ["Bash"] },
+      hooks: { Stop: [] },
+      model: "opus",
+      env: { MY_OWN_VAR: "keep-me" },
+    })
+  );
+
+  settings.applyEnv({ ANTHROPIC_BASE_URL: "https://api.deepseek.com/anthropic" }, []);
+  let after = JSON.parse(fs.readFileSync(file, "utf8"));
+  check("unrelated top-level settings survive", after.model === "opus" && after.hooks !== undefined);
+  check("permissions survive", after.permissions.allow[0] === "Bash");
+  check("hand-written env entries survive", after.env.MY_OWN_VAR === "keep-me");
+  check("provider var is written", after.env.ANTHROPIC_BASE_URL === "https://api.deepseek.com/anthropic");
+
+  // Switching back to a subscription must strip only what we own.
+  settings.applyEnv({}, keysToClear(["ANTHROPIC_BASE_URL"], {}));
+  after = JSON.parse(fs.readFileSync(file, "utf8"));
+  check("managed vars are removed on switch back", after.env.ANTHROPIC_BASE_URL === undefined);
+  check("hand-written env still survives the cleanup", after.env.MY_OWN_VAR === "keep-me");
+  check("other settings still intact after cleanup", after.model === "opus");
+
+  // With nothing left of ours, an env block that becomes empty is dropped entirely.
+  fs.writeFileSync(file, JSON.stringify({ model: "opus", env: { ANTHROPIC_BASE_URL: "x" } }));
+  settings.applyEnv({}, ["ANTHROPIC_BASE_URL"]);
+  after = JSON.parse(fs.readFileSync(file, "utf8"));
+  check("empty env block is removed", !("env" in after));
+
+  settings.applyEnv({ ANTHROPIC_MODEL: "deepseek-flash" }, []);
+  check("readEnv reads back written values", settings.readEnv().ANTHROPIC_MODEL === "deepseek-flash");
+
+  // Never destroy a file we cannot parse.
+  fs.writeFileSync(file, "{ this is not json");
+  let refused = false;
+  try {
+    settings.applyEnv({ ANTHROPIC_BASE_URL: "y" }, []);
+  } catch {
+    refused = true;
+  }
+  check("malformed settings.json is refused, not overwritten", refused);
+  check("malformed file left untouched", fs.readFileSync(file, "utf8") === "{ this is not json");
+
+  // Creating from scratch when no settings.json exists yet.
+  fs.rmSync(file);
+  settings.applyEnv({ ANTHROPIC_BASE_URL: "https://z" }, []);
+  check(
+    "creates settings.json when absent",
+    JSON.parse(fs.readFileSync(file, "utf8")).env.ANTHROPIC_BASE_URL === "https://z"
+  );
+
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function runCompatTests(): void {
+  console.log("Conversation compatibility:");
+
+  check(
+    "trailing slash ignored",
+    normalizeBaseUrl("https://API.deepseek.com/anthropic/") === "https://api.deepseek.com/anthropic"
+  );
+  check("default https port ignored", normalizeBaseUrl("https://x.com:443/a") === normalizeBaseUrl("https://x.com/a"));
+  check("path is significant", normalizeBaseUrl("https://x.com/a") !== normalizeBaseUrl("https://x.com/b"));
+
+  const oauthOld: AccountProfile = { id: "a", label: "Max #1", addedAt: 0, order: 0 };
+  const oauthNew: AccountProfile = { id: "b", label: "Max #2", kind: "oauth", addedAt: 0, order: 1 };
+  check("profile without kind is treated as a subscription", compatKey(oauthOld) === OAUTH_COMPAT_KEY);
+  check("all subscriptions are interchangeable", isCompatible(oauthOld, oauthNew));
+
+  const ds1 = providerProfile({ model: "deepseek-flash" });
+  const ds2 = providerProfile({ model: "deepseek-flash" });
+  const dsReasoner = providerProfile({ model: "deepseek-reasoner" });
+  check("same endpoint + model, different key is safe", isCompatible(ds1, ds2));
+  check("same provider, different model is not safe", !isCompatible(ds1, dsReasoner));
+  check("subscription vs provider is not safe", !isCompatible(oauthOld, ds1));
+
+  // One OpenRouter account can route to different model families.
+  const orClaude = providerProfile({
+    baseUrl: "https://openrouter.ai/api",
+    model: "~anthropic/claude-opus-latest",
+  });
+  const orDeepseek = providerProfile({
+    baseUrl: "https://openrouter.ai/api",
+    model: "deepseek/deepseek-chat",
+  });
+  check("same gateway, different model family is not safe", !isCompatible(orClaude, orDeepseek));
+
+  // A [1m] variant changes the context window, so it is a different identity.
+  const glm = providerProfile({ baseUrl: "https://open.bigmodel.cn/api/anthropic", model: "glm-5.2" });
+  const glm1m = providerProfile({ baseUrl: "https://open.bigmodel.cn/api/anthropic", model: "glm-5.2[1m]" });
+  check("[1m] variant is a distinct identity", !isCompatible(glm, glm1m));
+
+  // Manual override wins over the automatic key.
+  const manualA = providerProfile({ model: "deepseek-flash" }, { compatGroup: "mine" });
+  const manualB = providerProfile({ baseUrl: "https://other.example/anthropic", model: "x" }, { compatGroup: "mine" });
+  check("manual compat group overrides base url and model", isCompatible(manualA, manualB));
+  check("manual group does not leak into automatic profiles", !isCompatible(manualA, ds1));
+}
+
+function runActiveResolutionTests(): void {
+  console.log("Active profile resolution:");
+
+  // A pinned env block, not .credentials.json, decides which profile is really active - the
+  // subscription tokens are deliberately left on disk when a provider is in use.
+  const sub: AccountProfile = { id: "sub", label: "Max #1", addedAt: 0, order: 0 };
+  const flash = providerProfile({ model: "deepseek-flash" }, { id: "flash", label: "DS flash" });
+  const reasoner = providerProfile({ model: "deepseek-reasoner" }, { id: "reason", label: "DS reasoner" });
+  const profiles = [sub, flash, reasoner];
+
+  check(
+    "pinned base url + model selects the right provider profile",
+    findProfileForEnv(profiles, "https://api.deepseek.com/anthropic", "deepseek-reasoner")?.id === "reason"
+  );
+  check(
+    "url normalisation applies when resolving",
+    findProfileForEnv(profiles, "https://API.deepseek.com/anthropic/", "deepseek-flash")?.id === "flash"
+  );
+  check(
+    "an unpinned env resolves to nothing, leaving credentials in charge",
+    findProfileForEnv(profiles, undefined, undefined) === undefined
+  );
+  check(
+    "an unknown endpoint never claims a profile",
+    findProfileForEnv(profiles, "https://unknown.example/anthropic", "x") === undefined
+  );
+  check(
+    "a subscription profile is never matched by an env pin",
+    findProfileForEnv([sub], "https://api.anthropic.com", undefined) === undefined
+  );
+  check(
+    "ambiguous model falls back to the first profile on that endpoint",
+    findProfileForEnv(profiles, "https://api.deepseek.com/anthropic", "who-knows")?.id === "flash"
+  );
+}
+
+function runSessionScanTests(): void {
+  console.log("Session scan:");
+
+  check(
+    "cwd is sanitised the same way Claude Code does",
+    sanitizeCwd("e:\\Projects\\AI-Trading") === "e--Projects-AI-Trading"
+  );
+
+  const cfg = fs.mkdtempSync(path.join(os.tmpdir(), "cas-sessions-"));
+  const cwd = "e:\\Demo\\Proj";
+  const dir = path.join(cfg, "projects", sanitizeCwd(cwd));
+  fs.mkdirSync(dir, { recursive: true });
+
+  const lines = [
+    JSON.stringify({ type: "user", message: { role: "user", content: "hi" } }),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "thinking", signature: "sig" }],
+      },
+    }),
+    JSON.stringify({ type: "summary", leafUuid: "x" }),
+  ];
+  fs.writeFileSync(path.join(dir, "s1.jsonl"), lines.join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, "s2.jsonl"), lines.join("\n") + "\n");
+  fs.writeFileSync(path.join(dir, "notes.txt"), "ignored");
+
+  const scan = scanSessions(cfg, cwd);
+  check("counts transcripts for the folder", scan.count === 2);
+  check("reports the newest model", scan.newestModel === "claude-opus-5");
+  check("reports a newest timestamp", typeof scan.newestMtime === "number");
+
+  const synthetic = path.join(dir, "s3.jsonl");
+  fs.writeFileSync(synthetic, JSON.stringify({ message: { model: "<synthetic>" } }) + "\n");
+  check("synthetic model names are skipped", readLastModel(synthetic) === undefined);
+
+  check("unknown folder scans clean", scanSessions(cfg, "e:\\Nope").count === 0);
+  fs.rmSync(cfg, { recursive: true, force: true });
+
+  const empty = { count: 0, dirs: [] };
+  const some = { count: 3, dirs: ["d"] };
+  check("never mode stays silent", !shouldWarnOnSwitch("never", some));
+  check("always mode warns with no sessions", shouldWarnOnSwitch("always", empty));
+  check("default mode is quiet in a fresh folder", !shouldWarnOnSwitch("whenSessionsExist", empty));
+  check("default mode warns when sessions exist", shouldWarnOnSwitch("whenSessionsExist", some));
 }
 
 async function runTokenRefresherTests(): Promise<void> {
@@ -591,6 +863,11 @@ runBrowserOAuthTests();
 runAccountStoreTests()
   .then(runUsagePollerTests)
   .then(runSwitchServiceTests)
+  .then(runProviderEnvTests)
+  .then(runClaudeSettingsTests)
+  .then(runCompatTests)
+  .then(runActiveResolutionTests)
+  .then(runSessionScanTests)
   .then(runTokenRefresherTests)
   .then(() => {
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

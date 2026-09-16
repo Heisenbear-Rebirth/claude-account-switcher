@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { AccountStore } from "../accountStore";
+import { compatLabel } from "../compat";
 import { requiresProfileReauthorization } from "../oauth";
 
 /**
@@ -11,7 +12,7 @@ export class StatusBarController {
 
   constructor(private readonly store: AccountStore) {
     this.item = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    this.item.command = "claudeSwitcher.switchAccount";
+    this.item.command = "claudeProviderSwitcher.switchAccount";
     this.item.show();
   }
 
@@ -20,8 +21,23 @@ export class StatusBarController {
     const active = activeId ? this.store.get(activeId) : undefined;
 
     if (!active) {
-      this.item.text = "$(account) Claude: no account";
-      this.item.tooltip = "Click to add/switch a Claude account";
+      this.item.text = "$(account) Claude: no profile";
+      this.item.tooltip = "Click to add or switch a Claude account or API provider";
+      this.item.backgroundColor = undefined;
+      return;
+    }
+
+    // API-provider profiles have no usage windows; show what they are pointed at instead.
+    if (active.kind === "api") {
+      const model = active.provider?.model;
+      this.item.text = `$(plug) ${active.label}`;
+      this.item.tooltip = [
+        `Active Claude Code provider: ${active.label}`,
+        `  Endpoint: ${active.provider?.baseUrl ?? "not configured"}`,
+        model ? `  Model: ${model}` : "  Model: endpoint default",
+        `  Conversation group: ${compatLabel(active)}`,
+        "Click to switch profile.",
+      ].join("\n");
       this.item.backgroundColor = undefined;
       return;
     }
@@ -44,7 +60,7 @@ export class StatusBarController {
     this.item.tooltip = lines.join("\n");
 
     const warn = vscode.workspace
-      .getConfiguration("claudeSwitcher")
+      .getConfiguration("claudeProviderSwitcher")
       .get<number>("warnThresholdPercent", 80);
     this.item.backgroundColor =
       typeof session === "number" && session >= warn

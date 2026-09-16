@@ -8,6 +8,9 @@
   document.getElementById("addBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "add" });
   });
+  document.getElementById("addProviderBtn").addEventListener("click", () => {
+    vscode.postMessage({ type: "addProvider" });
+  });
   document.getElementById("loginBtn").addEventListener("click", () => {
     vscode.postMessage({ type: "login" });
   });
@@ -90,6 +93,21 @@
     return b;
   }
 
+  /**
+   * Dot marking which conversation-compatibility group a profile belongs to. Cards sharing a
+   * colour can be swapped mid-conversation; switching across colours needs a new conversation.
+   */
+  function compatDot(acc) {
+    const dot = document.createElement("span");
+    dot.className = "compat-dot compat-" + (acc.compatIndex % 6);
+    dot.title =
+      `Compatibility group: ${acc.compatName}\n` +
+      "Cards with this colour can be switched mid-conversation.\n" +
+      "Switching to a different colour requires starting a new conversation.";
+    dot.addEventListener("click", () => vscode.postMessage({ type: "setCompat", id: acc.id }));
+    return dot;
+  }
+
   function card(acc, warn) {
     const el = document.createElement("div");
     el.className = "card" + (acc.isActive ? " active" : "");
@@ -99,13 +117,20 @@
 
     const title = document.createElement("div");
     title.className = "title";
+    title.appendChild(compatDot(acc));
     const name = document.createElement("span");
     name.textContent = acc.label;
     title.appendChild(name);
+
     if (acc.isActive) {
       const badge = document.createElement("span");
       badge.className = "badge active";
       badge.textContent = "active";
+      title.appendChild(badge);
+    } else if (acc.kind === "api") {
+      const badge = document.createElement("span");
+      badge.className = "badge provider";
+      badge.textContent = "API";
       title.appendChild(badge);
     } else if (acc.subscriptionType) {
       const badge = document.createElement("span");
@@ -115,16 +140,25 @@
     }
     head.appendChild(title);
 
-    const headBtns = document.createElement("div");
-    headBtns.appendChild(
-      iconButton("⟳", "Refresh usage limits", () =>
-        vscode.postMessage({ type: "refresh", id: acc.id })
-      )
-    );
-    head.appendChild(headBtns);
+    if (acc.kind !== "api") {
+      const headBtns = document.createElement("div");
+      headBtns.appendChild(
+        iconButton("⟳", "Refresh usage limits", () =>
+          vscode.postMessage({ type: "refresh", id: acc.id })
+        )
+      );
+      head.appendChild(headBtns);
+    }
     el.appendChild(head);
 
-    if (acc.windows && acc.windows.length) {
+    if (acc.kind === "api") {
+      const info = document.createElement("div");
+      info.className = "sub endpoint";
+      info.style.marginTop = "6px";
+      info.textContent = acc.model ? `${acc.endpoint} · ${acc.model}` : acc.endpoint || "";
+      info.title = "Endpoint and model this profile pins";
+      el.appendChild(info);
+    } else if (acc.windows && acc.windows.length) {
       for (const w of acc.windows) {
         el.appendChild(meter(w, warn));
       }
@@ -143,18 +177,20 @@
       el.appendChild(e);
     }
 
-    const foot = document.createElement("div");
-    foot.className = "sub";
-    foot.style.marginTop = "6px";
-    foot.textContent = fmtAgo(acc.fetchedAt);
-    el.appendChild(foot);
+    if (acc.kind !== "api") {
+      const foot = document.createElement("div");
+      foot.className = "sub";
+      foot.style.marginTop = "6px";
+      foot.textContent = fmtAgo(acc.fetchedAt);
+      el.appendChild(foot);
+    }
 
     const actions = document.createElement("div");
     actions.className = "actions";
 
     const win = document.createElement("button");
     win.textContent = "Window";
-    win.title = "Open this account in an independent VS Code window";
+    win.title = "Open this profile in an independent VS Code window";
     win.addEventListener("click", () => vscode.postMessage({ type: "openWindow", id: acc.id }));
     actions.appendChild(win);
 
@@ -164,7 +200,21 @@
       sw.textContent = "Switch";
       sw.addEventListener("click", () => vscode.postMessage({ type: "switch", id: acc.id }));
       actions.appendChild(sw);
+    }
 
+    if (acc.kind === "api") {
+      const test = document.createElement("button");
+      test.textContent = "Test";
+      test.title = "Run one throwaway turn against this endpoint to verify the key and model";
+      test.addEventListener("click", () => vscode.postMessage({ type: "sayHi", id: acc.id }));
+      actions.appendChild(test);
+
+      const edit = document.createElement("button");
+      edit.textContent = "Edit";
+      edit.title = "Change the base URL, model or API key";
+      edit.addEventListener("click", () => vscode.postMessage({ type: "editProvider", id: acc.id }));
+      actions.appendChild(edit);
+    } else if (!acc.isActive) {
       const hi = document.createElement("button");
       hi.textContent = "Hi";
       hi.title = "Run a one-turn Haiku warmup without switching accounts";

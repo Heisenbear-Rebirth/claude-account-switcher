@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0
+
+Forked from `KrzysztofZander/claude-account-switcher` 0.2.5, with a new extension id so both can be
+installed side by side. All upstream behaviour is preserved.
+
+- **API-provider profiles.** Point Claude Code at any Anthropic-compatible endpoint with its own
+  API key and models, alongside your existing Claude subscription profiles. Switching rewrites the
+  `env` block of `settings.json`; switching back to a subscription strips it again.
+- **Built-in presets** for DeepSeek, OpenRouter, Kimi, GLM, Qwen and MiniMax, plus a blank Custom
+  entry for self-hosted gateways such as a local Ollama. Base URLs and model names were taken from
+  each vendor's own Claude Code documentation.
+- **Connection test.** "Say Hi" on a provider profile runs one throwaway turn against the endpoint
+  inside an isolated config directory, so a wrong key or model name is caught immediately without
+  disturbing the active configuration.
+- **Conversation-compatibility guard.** Warns before a switch that would make the current folder's
+  conversations unresumable, because transcripts replay signed `thinking` blocks that a different
+  endpoint cannot validate. Profiles that differ only by API key are considered compatible and
+  never prompt. Coloured dots in the panel show which cards are interchangeable, and a manual
+  group can override the automatic (base URL, model) rule. Session files are only ever read.
+- Keys are sent as `ANTHROPIC_AUTH_TOKEN` by default, avoiding Claude Code's interactive approval
+  prompt for `ANTHROPIC_API_KEY`; the `x-api-key` style remains available.
+- Only this extension's own environment variables are written or removed. Other `env` entries and
+  every other setting in `settings.json` are preserved, and a malformed file aborts the switch
+  instead of being overwritten.
+- Independent windows and usage polling understand provider profiles: providers get their own
+  `CLAUDE_CONFIG_DIR`, and are never polled against the subscription-only usage endpoint.
+- Added a generic Anthropic-format relay/gateway preset, and a per-model note shown in the model
+  picker recording whether a model actually returns extended thinking. Measured by inspecting what
+  Claude Code persists: through one such gateway, `gpt-6-astra` and `gpt-5.6-terra` yield no
+  thinking blocks at any budget, `claude-opus-5` and `deepseek-v4-pro-max` return signed ones, and
+  the requested thinking budget is ignored outright.
+- Command and configuration namespace moved from `claudeSwitcher.*` to `claudeProviderSwitcher.*`.
+
 ## 0.2.5
 
 - Added browser-based OAuth authorization that works without Claude Code CLI.

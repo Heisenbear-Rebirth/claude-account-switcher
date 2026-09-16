@@ -1,177 +1,225 @@
-# Claude Multi-Account Switcher
+# Claude Multi-Provider Switcher
 
-Quickly switch between Claude accounts (subscriptions) in **Claude Code** inside VS Code,
-with live usage limits for all your accounts at a glance.
+Switch **Claude Code** between your Claude subscription accounts *and* third-party API providers —
+DeepSeek, OpenRouter, Kimi, GLM, Qwen, MiniMax, a local Ollama gateway, anything that speaks the
+Anthropic Messages API — each with its own API key and models, from one panel in VS Code.
+
+> A fork of [KrzysztofZander/claude-account-switcher](https://github.com/KrzysztofZander/claude-account-switcher)
+> (MIT), which does the subscription-account half of this and does it well. This fork adds
+> API-provider profiles on top. All upstream behaviour is preserved.
+>
+> It uses a different extension id from upstream, so the two can be installed side by side. Profiles
+> are stored per extension id, so saved accounts do not carry over — save them once here.
 
 ## Why
 
-You have several Claude subscriptions. When one account runs out of usage (the 5-hour or
-weekly window), switch Claude Code to another account with a single click — no manual logout
-and re-login.
+Two problems, one panel:
+
+- **You have several Claude subscriptions.** When one hits its 5-hour or weekly limit, switch to
+  another with a click instead of logging out and back in.
+- **You want to fall back to a cheaper or different model.** Point Claude Code at DeepSeek or
+  OpenRouter with its own key and model, then come back to your subscription — without ever
+  hand-editing `settings.json` or juggling shell environment variables.
 
 ## Features
 
-- **Save accounts** — log in normally in Claude Code, then click "Save current account";
-  the extension remembers the profile (tokens are kept in VS Code's encrypted secret storage).
-- **Fast switching** — from the panel, the status bar, or the command palette (QuickPick).
-- **Live usage limits** — utilization (%) of the 5-hour and weekly windows for each account,
-  with time until reset. Data comes from the same source as the `/usage` command.
-- **Say Hi warmup** — run a one-turn `claude -p "Hi"` on inactive saved accounts using
-  `--model haiku` by default, without switching the active `.credentials.json`.
-- **Independent account windows** — open the same project in separate VS Code windows, each
-  with its own Claude account and `CLAUDE_CONFIG_DIR`.
-- **Browser authorization** — if Claude Code CLI is unavailable, complete OAuth login in the
-  default browser; a dedicated command is available even when the CLI is installed.
-- **Login helper** — prefers an integrated terminal with `claude auth login` when the CLI is
-  available, then falls back to browser authorization.
-- **Isolated reauthorization** — if a saved profile's credentials break, re-login happens in
-  that profile's own `CLAUDE_CONFIG_DIR` instead of copying the currently active account.
-- **Status bar** — the active account and its usage % always in view.
+**Subscription accounts** (from upstream)
+
+- Save the logged-in account as a profile; tokens live in VS Code's encrypted secret storage
+- Fast switching from the panel, status bar, or command palette
+- Live usage limits (5-hour and weekly windows) with time until reset
+- "Say Hi" warmups, independent account windows, browser authorization, isolated reauthorization
+
+**API providers** (new)
+
+- Add a provider in a five-step wizard; the key is typed into a real password field
+- Built-in presets for DeepSeek, OpenRouter, Kimi, GLM, Qwen and MiniMax, plus a blank *Custom*
+  entry for self-hosted gateways. Every field stays editable
+- **Test connection** — runs one throwaway turn against the endpoint in an isolated config
+  directory, so a wrong key or a misspelled model name surfaces immediately instead of at your
+  next real prompt
+- Independent windows work for providers too: a DeepSeek window and a Claude subscription window
+  can run side by side on the same folder
+- **Conversation-compatibility guard** — warns before a switch that would make this folder's
+  existing conversations unresumable (see below)
+
+## Built-in presets
+
+Base URLs and model names below were taken from each vendor's own Claude Code documentation
+(checked 2026-09-16). Vendors rename models often — everything is editable, and the wizard always
+lets you type your own.
+
+| Provider | Base URL | Example models |
+|---|---|---|
+| DeepSeek | `https://api.deepseek.com/anthropic` | `deepseek-flash[1m]`, `deepseek-v4-pro` |
+| OpenRouter | `https://openrouter.ai/api` | `~anthropic/claude-opus-latest[1m]` |
+| Kimi (Moonshot) | `https://api.moonshot.cn/anthropic` (or `.ai`) | `kimi-k3[1m]`, `kimi-k2.7-code` |
+| GLM (Zhipu) | `https://open.bigmodel.cn/api/anthropic` (or `api.z.ai`) | `glm-5.2[1m]`, `glm-4.7` |
+| Qwen (DashScope) | `https://dashscope.aliyuncs.com/apps/anthropic` | `qwen3-coder-plus`, `qwen3-max` |
+| MiniMax | `https://api.minimax.cn/anthropic` (or `.io`) | `MiniMax-M2` |
+| Relay / gateway | you provide it | carries measured thinking notes for common relay models |
+| Custom | you provide it | anything Anthropic-compatible |
+
+Pick the base URL matching the console where the key was created — several vendors run separate
+mainland-China and global endpoints, and keys are not interchangeable between them.
+
+### Not every model behind a gateway returns thinking
+
+A gateway that speaks the Anthropic protocol does not necessarily carry extended thinking through
+to the model behind it, and **a gateway that silently drops it looks exactly like one that never
+had it** — same HTTP 200, same text answer, no warning anywhere.
+
+The only reliable check is what Claude Code actually persists. Run a prompt, then look for
+`thinking` blocks in the transcript under `~/.claude/projects/<folder>/*.jsonl`. No blocks means
+no reasoning is carried into the next turn, no matter what `thinking` or `MAX_THINKING_TOKENS`
+you set.
+
+Measured on one Anthropic-format relay (2026-09-16), same prompt, same client:
+
+| Model | `thinking` blocks persisted | Signed |
+|---|---|---|
+| `gpt-6-astra` | 0 (at budgets 8 000 and 31 999 alike) | — |
+| `gpt-5.6-terra` | 0 | — |
+| `claude-opus-5` | 2 | yes |
+| `deepseek-v4-pro-max` | 1 | yes |
+
+Where a preset records this, the model picker shows it inline. Models that return no thinking are
+still perfectly usable — you simply lose reasoning continuity across turns, and raising the
+thinking budget does nothing.
+
+### Nor is the thinking budget necessarily honoured
+
+Returning thinking and *respecting how much of it you asked for* are separate questions. On the
+same gateway, `claude-opus-5` does return properly signed thinking that survives into the next turn —
+but the requested budget is ignored outright. Three streamed runs at each extreme:
+
+| Requested `budget_tokens` | Actual `thinking_tokens` | Mean |
+|---|---|---|
+| 1 024 | 698, 2 278, 2 849 | 1 942 |
+| 24 000 | 333, 640, — | 487 |
+
+The low-budget runs overshot their stated ceiling by up to 2.8×, the high-budget runs came in far
+below it, and omitting the `thinking` parameter entirely still produced 2 274 thinking tokens. The
+give-away is validation: a real Anthropic endpoint returns `400` when `budget_tokens` ≥ `max_tokens`
+or is below the 1 024 minimum, and this gateway answered `200` to both — it is not forwarding the
+parameter at all.
+
+Practical consequence: on such a gateway, `/effort`, `effortLevel` and `MAX_THINKING_TOKENS` appear
+to work and change nothing. To check your own endpoint, send the same prompt at two very different
+budgets and compare `usage.output_tokens_details.thinking_tokens`; if the numbers do not track the
+request, the budget is being dropped.
+
+
+## How switching works
+
+Two mechanisms, one for each kind of profile:
+
+- **Subscription profiles** swap the contents of `~/.claude/.credentials.json`, exactly as upstream
+  does. A `.bak` copy is kept so the switch can be undone.
+- **API-provider profiles** rewrite the `env` block of `~/.claude/settings.json` — the officially
+  supported place to set environment variables for Claude Code sessions. Switching back to a
+  subscription strips those variables again.
+
+Only the variables this extension owns are ever touched:
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`,
+`ANTHROPIC_SMALL_FAST_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`,
+`CLAUDE_CODE_SUBAGENT_MODEL`, plus any extra variables a preset declares. Your own entries in
+`env`, and every other setting in the file (`permissions`, `hooks`, `model`, `statusLine`, …), are
+preserved untouched. A `settings.json` that is not valid JSON aborts the switch rather than being
+overwritten.
+
+The key is sent as `ANTHROPIC_AUTH_TOKEN` rather than `ANTHROPIC_API_KEY` by default, because
+Claude Code gates `ANTHROPIC_API_KEY` behind an interactive "Use custom API key" approval prompt
+while `ANTHROPIC_AUTH_TOKEN` is used directly. The `apiKey` style is available for endpoints that
+require the `x-api-key` header.
+
+**After switching you must reload the VS Code window** — environment variables are read when a
+Claude Code session starts, so a running session keeps the provider it launched with. The extension
+offers to reload, and auto-reload can be enabled in settings.
+
+Because settings live in the config directory, everything above also works inside a per-profile
+`CLAUDE_CONFIG_DIR`, which is what independent windows use.
+
+## Conversation compatibility
+
+**A conversation cannot be continued across a provider change.** This is the one sharp edge, and
+the extension guards it.
+
+Claude Code transcripts store every assistant turn, including `thinking` blocks carrying a
+cryptographic `signature`, and they are replayed in full on `--continue` / `--resume`. Claude Code
+does not strip them when the endpoint changes. Replaying Anthropic-signed thinking blocks at a
+third-party endpoint gets them either rejected or — worse, because it is invisible — silently
+dropped, which quietly destroys the reasoning context. The reverse direction fails outright:
+the CLI has named error classes for exactly this (`invalid_thinking_signature`,
+`thinking_blocks_modified`).
+
+Two profiles are treated as interchangeable only when they address the **same base URL with the
+same model** and differ solely by API key. That is exactly the situation upstream's
+subscription-account switching has always been in, which is why it is safe. Model granularity
+matters as much as the provider: one OpenRouter key can route to entirely different model families,
+and `deepseek-chat` vs `deepseek-reasoner` differ in whether they emit reasoning at all.
+
+In the panel each card carries a coloured dot. **Same colour = safe to switch mid-conversation.**
+Switching across colours shows a confirmation naming how many conversations this folder already has
+and what produced the newest one. Click the dot to put profiles into a shared group manually when
+you know two of them are interchangeable.
+
+Nothing about your conversations is ever modified: the check only reads the transcript directory to
+count files and to look up the newest model name. Control it with
+`claudeProviderSwitcher.warnOnIncompatibleSwitch` (`always` / `whenSessionsExist` / `never`).
+
+## A note on where your API key ends up
+
+Switching to a provider writes the key **in plain text** into `~/.claude/settings.json`. This is
+unavoidable: the Claude Code CLI has to read it, and it is what every provider's own setup guide
+tells you to do. The file is written with `0600` permissions.
+
+The extension's own copy of the key is held in VS Code's encrypted `SecretStorage`; the plaintext
+copy exists only in the file Claude Code reads. If that trade-off is not acceptable, use an
+`apiKeyHelper` in `settings.json` instead of this extension's provider profiles.
 
 ## Requirements
 
-- Claude Code CLI is optional for browser authorization, account switching, and usage checks.
-  It is still required for **Say Hi**, CLI-based identity checks, and using Claude Code itself.
-- For CLI-only features, the `claude` command must be available in VS Code's PATH, or
-  `claudeSwitcher.claudeCommand` must point to the full path of `claude`, `claude.exe`, or
-  `claude.cmd`.
-- On Windows PowerShell, Claude Code CLI can be installed with:
+- **Claude Code CLI** is required for connection tests, "Say Hi" warmups and CLI identity checks,
+  and of course for using Claude Code itself. Account switching and usage checks work without it.
+- The `claude` command must be on VS Code's PATH, or `claudeProviderSwitcher.claudeCommand` must
+  point at `claude`, `claude.exe`, or `claude.cmd`.
+- On Windows PowerShell, Claude Code can be installed with:
 
 ```powershell
 irm https://claude.ai/install.ps1 | iex
 ```
-
-## How it works
-
-- Claude Code credentials live in `~/.claude/.credentials.json`. Switching accounts simply and
-  safely swaps the contents of that file (a `.bak` backup is kept so you can undo).
-- **After switching you must reload the VS Code window** so Claude Code picks up the new
-  account — the extension offers to do it automatically (auto-reload can be enabled in settings).
-- Saved inactive accounts are warmed up through an isolated `CLAUDE_CONFIG_DIR` under the
-  extension's global storage. This lets "Say Hi" refresh/use that account without changing the
-  currently active Claude Code account.
-- Independent windows use generated `.code-workspace` files under the extension's global storage.
-  Each window points Claude Code at the selected account's isolated config directory.
-- Usage is read from the unofficial `api.anthropic.com/api/oauth/usage` endpoint (the same
-  source as `/usage`). It is **heavily rate-limited**, so refreshing is capped to a safe interval
-  (240s by default, minimum 180s) plus a manual ⟳ refresh.
-- Active profiles are advertised through short-lived cross-window leases. Background usage
-  polling never spends a rotating refresh token owned by a live Claude Code window, while
-  inactive-account refreshes remain guarded by a cross-window lock and are copied back to every
-  matching local credential file.
-
-## Usage
-
-1. Log in to Claude Code with account #1.
-2. Open the **Claude Accounts** panel (activity bar icon) → **"+ Save current account"**.
-3. Log out / log in (`/login`) to account #2 in Claude Code → **"Save current account"** again.
-4. From now on, switch with one click via **"Switch"** on an account card (or the status bar /
-   `Claude: Switch account`). After confirmation the window reloads and Claude Code runs on the
-   selected account.
-
-## Commands
-
-| Command | Description |
-| --- | --- |
-| `Claude: Save current account as profile` | saves the currently logged-in account |
-| `Claude: Switch account` | QuickPick with usage limits |
-| `Claude: Refresh usage limits` | forces a refresh |
-| `Claude: Say Hi on account` | warms up inactive saved accounts via `claude -p` |
-| `Claude: Open independent account window` | opens this project in a new VS Code window scoped to one account |
-| `Claude: Log in from terminal` | opens `claude auth login`, or falls back to browser authorization when CLI is unavailable |
-| `Claude: Authorize in browser (without CLI)` | completes OAuth authorization in the default browser |
-| `Claude: Reauthorize account profile` | opens isolated login for a saved profile without touching the active account |
-| `Claude: Complete profile reauthorization` | imports the completed isolated login into that same profile |
-| `Claude: Undo last switch` | restores the previous account from `.bak` |
-| `Claude: Remove / Rename account profile` | manage profiles |
 
 ## Settings
 
-| Key | Default | Description |
-| --- | --- | --- |
-| `claudeSwitcher.pollIntervalSeconds` | `240` | auto-refresh interval (min 180) |
-| `claudeSwitcher.autoReloadAfterSwitch` | `false` | auto-reload the window after switching |
-| `claudeSwitcher.credentialsPath` | `""` | override the path to `.credentials.json` |
-| `claudeSwitcher.warnThresholdPercent` | `80` | warning threshold (% → red bar) |
-| `claudeSwitcher.claudeCommand` | `claude` | CLI command used for CLI login and Say Hi; set the full path if VS Code cannot find it |
-| `claudeSwitcher.sayHiModel` | `haiku` | model alias passed to `claude -p` |
-| `claudeSwitcher.sayHiPrompt` | `Hi` | prompt used by Say Hi |
-| `claudeSwitcher.sayHiTimeoutSeconds` | `120` | Say Hi timeout |
+| Setting | Default | What it does |
+|---|---|---|
+| `claudeProviderSwitcher.warnOnIncompatibleSwitch` | `whenSessionsExist` | Confirm before a switch that breaks conversation continuity |
+| `claudeProviderSwitcher.autoReloadAfterSwitch` | `false` | Reload the window automatically after switching |
+| `claudeProviderSwitcher.pollIntervalSeconds` | `240` | Usage refresh interval (subscriptions only; min 180s) |
+| `claudeProviderSwitcher.warnThresholdPercent` | `80` | Usage % above which the bar turns red |
+| `claudeProviderSwitcher.credentialsPath` | `""` | Override the path to `.credentials.json` |
+| `claudeProviderSwitcher.claudeCommand` | `claude` | Path to the Claude Code CLI |
+| `claudeProviderSwitcher.sayHiModel` | `haiku` | Model for subscription warmups |
+| `claudeProviderSwitcher.sayHiPrompt` | `Hi` | Prompt for warmups and connection tests |
+| `claudeProviderSwitcher.sayHiTimeoutSeconds` | `120` | Timeout for warmups and connection tests |
 
-## Troubleshooting Say Hi
-
-If Say Hi reports that `claude` is not recognized, the VS Code extension process cannot find the
-Claude Code CLI. Try these in order:
-
-1. Run `where claude` in PowerShell or CMD.
-2. If it is found, restart VS Code so the extension host gets the refreshed PATH.
-3. If it is not found, install Claude Code CLI. On Windows PowerShell, the official installer is:
-
-```powershell
-irm https://claude.ai/install.ps1 | iex
-```
-
-4. If the command exists but VS Code still cannot see it, set `claudeSwitcher.claudeCommand` to the
-   full path, for example `C:\Users\you\AppData\Roaming\npm\claude.cmd` or the path returned by
-   `where claude`.
-
-## Parallel VS Code windows
-
-Use **Claude: Open independent account window** or the **Window** button on an account card.
-The extension writes the saved account credentials to a per-account config directory, generates a
-`.code-workspace` file for the current folder/workspace, and opens it in a new VS Code window.
-
-The default Claude Code login file is global, so two regular VS Code windows share the same active
-account. Independent windows avoid that by setting both:
-
-```json
-{
-  "claudeCode.environmentVariables": [
-    {
-      "name": "CLAUDE_CONFIG_DIR",
-      "value": "C:\\Users\\you\\.claude-user2"
-    }
-  ],
-  "claudeSwitcher.credentialsPath": "C:\\Users\\you\\.claude-user2\\.credentials.json"
-}
-```
-
-Open one generated window per account you want to run. The extension refuses to open a second
-active window for the same saved profile, because the upstream refresh token belongs to that
-account and can rotate.
-
-## Security and disclaimers
-
-- This extension does **not** collect telemetry, analytics, account identifiers, prompts,
-  credentials, tokens, usage data, or any other personal data.
-- No login data is sent to the extension author, publisher, marketplace backend, or any custom
-  third-party server controlled by this extension.
-- Saved profile secrets are stored in VS Code's encrypted **SecretStorage**.
-- Claude Code itself requires local `.credentials.json` files. For account switching, Say Hi,
-  and independent windows, the extension writes credentials only to local Claude Code config
-  directories on your machine, including isolated per-account `CLAUDE_CONFIG_DIR` folders under
-  the extension's global storage.
-- Credentials are never intentionally logged. Protect your machine and OS user account, because
-  anyone with local filesystem access to your user profile may be able to read Claude Code
-  credential files.
-- Network requests made by the extension go only to Anthropic endpoints needed for token refresh
-  and usage-limit checks. Say Hi is executed through the local Claude Code CLI, which communicates
-  with Anthropic as Claude Code normally does.
-- This tool is for managing **your own** accounts.
-- The usage endpoint and the token-refresh flow are **unofficial** and may change or stop working
-  on Anthropic's side.
-- Currently the file-based `.credentials.json` model is supported (Windows/Linux). The macOS
-  Keychain is not supported yet.
-
-## Development
+## Building
 
 ```bash
 npm install
-npm run watch       # build in watch mode
-# press F5 in VS Code -> Extension Development Host
-npm run build:vsix  # build the .vsix package
+npm run typecheck     # tsc --noEmit
+npm run test:smoke    # headless logic tests
+npm run package       # bundle to dist/
+npm run build:vsix    # produce an installable .vsix
+```
+
+Install the resulting `.vsix` with **Extensions → … → Install from VSIX**, or:
+
+```bash
+code --install-extension claude-code-multi-provider-switcher-0.3.0.vsix
 ```
 
 ## License
 
-MIT
+MIT. Original work © Krzysztof Zander; see [LICENSE](LICENSE).

@@ -26,10 +26,57 @@ export interface CredentialsFile {
   [key: string]: unknown;
 }
 
+/**
+ * How a profile authenticates Claude Code.
+ * - `oauth`  — a Claude subscription; switching swaps `.credentials.json` (upstream behaviour).
+ * - `api`    — a third-party (or direct) API endpoint; switching rewrites the `env` block of
+ *              `settings.json`.
+ * Absent means `oauth`, so profiles saved by upstream keep working untouched.
+ */
+export type ProfileKind = "oauth" | "api";
+
+/** Which header the key is sent in. */
+export type AuthStyle = "authToken" | "apiKey";
+
+/** Everything needed to point Claude Code at one API endpoint. No secrets here. */
+export interface ProviderConfig {
+  /** Id of the built-in preset this was created from, or "custom". */
+  presetId?: string;
+  /** ANTHROPIC_BASE_URL */
+  baseUrl: string;
+  /**
+   * `authToken` -> ANTHROPIC_AUTH_TOKEN (Authorization: Bearer). Default, and the only style that
+   * avoids Claude Code's interactive "Use custom API key" approval prompt.
+   * `apiKey` -> ANTHROPIC_API_KEY (x-api-key), for endpoints that require it.
+   */
+  authStyle: AuthStyle;
+  /** ANTHROPIC_MODEL — the main model. */
+  model?: string;
+  /** ANTHROPIC_SMALL_FAST_MODEL — background/cheap work. */
+  smallFastModel?: string;
+  /** What `/model opus|sonnet|haiku` map to on this endpoint. */
+  opusModel?: string;
+  sonnetModel?: string;
+  haikuModel?: string;
+  /** CLAUDE_CODE_SUBAGENT_MODEL */
+  subagentModel?: string;
+  /** Escape hatch: any other env var this provider wants (timeouts, custom headers, ...). */
+  extraEnv?: Record<string, string>;
+}
+
 /** Profile metadata (no secrets) — kept in globalState. */
 export interface AccountProfile {
   id: string;
   label: string;
+  /** Absent = "oauth", so upstream profiles load unchanged. */
+  kind?: ProfileKind;
+  /** Set when kind === "api". */
+  provider?: ProviderConfig;
+  /**
+   * Optional manual override for conversation compatibility. Profiles sharing a non-empty
+   * compatGroup are treated as interchangeable mid-conversation even if their baseUrl/model differ.
+   */
+  compatGroup?: string;
   subscriptionType?: string;
   authEmail?: string;
   authOrgId?: string;

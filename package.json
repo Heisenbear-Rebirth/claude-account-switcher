@@ -1,12 +1,11 @@
 {
-  "name": "claude-code-account-switcher",
-  "displayName": "Claude Multi-Account Switcher",
-  "description": "Quickly switch between Claude accounts (subscriptions) in Claude Code, with live usage limits.",
-  "version": "0.2.5",
-  "publisher": "KrzysztofZander",
+  "name": "claude-code-multi-provider-switcher",
+  "displayName": "Claude Multi-Provider Switcher",
+  "description": "Switch Claude Code between subscription accounts AND third-party API providers (DeepSeek, OpenRouter, Kimi, GLM, Qwen, MiniMax, Ollama, ...), each with its own API key and models.",
+  "version": "0.3.0",
+  "publisher": "Heisenbear-Rebirth",
   "author": {
-    "name": "Krzysztof Zander",
-    "email": "krzysztof.zander@retencja.pl"
+    "name": "Heisenbear-Rebirth"
   },
   "license": "MIT",
   "engines": {
@@ -22,7 +21,17 @@
     "account",
     "switcher",
     "usage",
-    "limits"
+    "limits",
+    "api provider",
+    "deepseek",
+    "openrouter",
+    "kimi",
+    "glm",
+    "qwen",
+    "minimax",
+    "ollama",
+    "base url",
+    "api key"
   ],
   "icon": "media/icon.png",
   "galleryBanner": {
@@ -31,7 +40,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/KrzysztofZander/claude-account-switcher"
+    "url": "https://github.com/Heisenbear-Rebirth/claude-account-switcher"
   },
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -41,177 +50,218 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "claudeSwitcher",
-          "title": "Claude Accounts",
+          "id": "claudeProviderSwitcher",
+          "title": "Claude Providers",
           "icon": "media/icon.svg"
         }
       ]
     },
     "views": {
-      "claudeSwitcher": [
+      "claudeProviderSwitcher": [
         {
-          "id": "claudeSwitcher.accountsView",
-          "name": "Accounts",
+          "id": "claudeProviderSwitcher.accountsView",
+          "name": "Accounts & Providers",
           "type": "webview"
         }
       ]
     },
     "commands": [
       {
-        "command": "claudeSwitcher.addCurrentAccount",
+        "command": "claudeProviderSwitcher.addCurrentAccount",
         "title": "Claude: Save current account as profile",
         "icon": "$(add)"
       },
       {
-        "command": "claudeSwitcher.switchAccount",
+        "command": "claudeProviderSwitcher.switchAccount",
         "title": "Claude: Switch account",
         "icon": "$(arrow-swap)"
       },
       {
-        "command": "claudeSwitcher.refreshUsage",
+        "command": "claudeProviderSwitcher.refreshUsage",
         "title": "Claude: Refresh usage limits",
         "icon": "$(refresh)"
       },
       {
-        "command": "claudeSwitcher.sayHi",
-        "title": "Claude: Say Hi on account",
+        "command": "claudeProviderSwitcher.sayHi",
+        "title": "Claude: Say Hi / test provider connection",
         "icon": "$(comment)"
       },
       {
-        "command": "claudeSwitcher.openIndependentWindow",
+        "command": "claudeProviderSwitcher.openIndependentWindow",
         "title": "Claude: Open independent account window",
         "icon": "$(window)"
       },
       {
-        "command": "claudeSwitcher.login",
+        "command": "claudeProviderSwitcher.login",
         "title": "Claude: Log in from terminal",
         "icon": "$(sign-in)"
       },
       {
-        "command": "claudeSwitcher.browserLogin",
+        "command": "claudeProviderSwitcher.browserLogin",
         "title": "Claude: Authorize in browser (without CLI)",
         "icon": "$(globe)"
       },
       {
-        "command": "claudeSwitcher.reauthorizeProfile",
+        "command": "claudeProviderSwitcher.reauthorizeProfile",
         "title": "Claude: Reauthorize account profile",
         "icon": "$(sign-in)"
       },
       {
-        "command": "claudeSwitcher.completeProfileReauthorization",
+        "command": "claudeProviderSwitcher.completeProfileReauthorization",
         "title": "Claude: Complete profile reauthorization",
         "icon": "$(pass)"
       },
       {
-        "command": "claudeSwitcher.removeAccount",
+        "command": "claudeProviderSwitcher.removeAccount",
         "title": "Claude: Remove account profile"
       },
       {
-        "command": "claudeSwitcher.renameAccount",
+        "command": "claudeProviderSwitcher.renameAccount",
         "title": "Claude: Rename account profile"
       },
       {
-        "command": "claudeSwitcher.undoSwitch",
+        "command": "claudeProviderSwitcher.undoSwitch",
         "title": "Claude: Undo last switch"
       },
       {
-        "command": "claudeSwitcher.openPanel",
+        "command": "claudeProviderSwitcher.openPanel",
         "title": "Claude: Show accounts panel"
+      },
+      {
+        "command": "claudeProviderSwitcher.addProviderProfile",
+        "title": "Claude: Add API provider profile",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "claudeProviderSwitcher.editProviderProfile",
+        "title": "Claude: Edit API provider profile",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "claudeProviderSwitcher.setCompatGroup",
+        "title": "Claude: Set conversation compatibility group",
+        "icon": "$(link)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "claudeSwitcher.addCurrentAccount",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.addCurrentAccount",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@1"
         },
         {
-          "command": "claudeSwitcher.refreshUsage",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.addProviderProfile",
+          "when": "view == claudeProviderSwitcher.accountsView",
+          "group": "navigation@1.5"
+        },
+        {
+          "command": "claudeProviderSwitcher.refreshUsage",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@2"
         },
         {
-          "command": "claudeSwitcher.sayHi",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.sayHi",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@3"
         },
         {
-          "command": "claudeSwitcher.openIndependentWindow",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.openIndependentWindow",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@4"
         },
         {
-          "command": "claudeSwitcher.login",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.login",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@5"
         },
         {
-          "command": "claudeSwitcher.browserLogin",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.browserLogin",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@5.5"
         },
         {
-          "command": "claudeSwitcher.reauthorizeProfile",
-          "when": "view == claudeSwitcher.accountsView",
+          "command": "claudeProviderSwitcher.reauthorizeProfile",
+          "when": "view == claudeProviderSwitcher.accountsView",
           "group": "navigation@6"
         }
       ],
       "commandPalette": [
         {
-          "command": "claudeSwitcher.removeAccount"
+          "command": "claudeProviderSwitcher.removeAccount"
         },
         {
-          "command": "claudeSwitcher.renameAccount"
+          "command": "claudeProviderSwitcher.renameAccount"
+        },
+        {
+          "command": "claudeProviderSwitcher.editProviderProfile"
+        },
+        {
+          "command": "claudeProviderSwitcher.setCompatGroup"
         }
       ]
     },
     "configuration": {
-      "title": "Claude Account Switcher",
+      "title": "Claude Multi-Provider Switcher",
       "properties": {
-        "claudeSwitcher.pollIntervalSeconds": {
+        "claudeProviderSwitcher.pollIntervalSeconds": {
           "type": "number",
           "default": 240,
           "minimum": 180,
-          "markdownDescription": "How often (in seconds) to automatically refresh usage limits for each account. The endpoint is heavily rate-limited — values below 180s are raised to 180s."
+          "markdownDescription": "How often (in seconds) to automatically refresh usage limits for each **subscription** account. The endpoint is heavily rate-limited - values below 180s are raised to 180s. API-provider profiles are never polled: third-party endpoints do not serve the usage API."
         },
-        "claudeSwitcher.autoReloadAfterSwitch": {
+        "claudeProviderSwitcher.autoReloadAfterSwitch": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Automatically reload the VS Code window after switching accounts (required for Claude Code to pick up the new account). When disabled, the extension asks first."
         },
-        "claudeSwitcher.credentialsPath": {
+        "claudeProviderSwitcher.credentialsPath": {
           "type": "string",
           "default": "",
           "markdownDescription": "Path to the Claude Code `.credentials.json` file. Empty = default `~/.claude/.credentials.json`."
         },
-        "claudeSwitcher.warnThresholdPercent": {
+        "claudeProviderSwitcher.warnThresholdPercent": {
           "type": "number",
           "default": 80,
           "minimum": 1,
           "maximum": 100,
           "markdownDescription": "Usage threshold (%) above which the limit bar turns red."
         },
-        "claudeSwitcher.claudeCommand": {
+        "claudeProviderSwitcher.claudeCommand": {
           "type": "string",
           "default": "claude",
           "markdownDescription": "Claude Code CLI command used for login and Say Hi warmups. Use the full path to `claude.cmd`/`claude.exe` if VS Code cannot find `claude` in PATH."
         },
-        "claudeSwitcher.sayHiModel": {
+        "claudeProviderSwitcher.sayHiModel": {
           "type": "string",
           "default": "haiku",
-          "markdownDescription": "Model passed to `claude -p` for Say Hi warmups. `haiku` is the low-cost/default warmup choice."
+          "markdownDescription": "Model passed to `claude -p` for Say Hi warmups on **subscription** profiles. `haiku` is the low-cost default. API-provider profiles ignore this and use their own configured model."
         },
-        "claudeSwitcher.sayHiPrompt": {
+        "claudeProviderSwitcher.sayHiPrompt": {
           "type": "string",
           "default": "Hi",
-          "markdownDescription": "Prompt used by Say Hi warmups."
+          "markdownDescription": "Prompt used by Say Hi warmups and by API-provider connection tests."
         },
-        "claudeSwitcher.sayHiTimeoutSeconds": {
+        "claudeProviderSwitcher.sayHiTimeoutSeconds": {
           "type": "number",
           "default": 120,
           "minimum": 15,
           "markdownDescription": "Maximum time to wait for a Say Hi warmup command."
+        },
+        "claudeProviderSwitcher.warnOnIncompatibleSwitch": {
+          "type": "string",
+          "enum": [
+            "always",
+            "whenSessionsExist",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Always confirm before switching between incompatible profiles.",
+            "Only confirm when this folder already has conversations that would be affected.",
+            "Never confirm."
+          ],
+          "default": "whenSessionsExist",
+          "markdownDescription": "Confirm before switching to a profile that uses a different endpoint or model. Existing conversations cannot be continued across such a switch: transcripts replay `thinking` blocks whose signatures the new endpoint cannot validate, so they are rejected or silently dropped. Profiles that differ only by API key are always considered compatible and never prompt."
         }
       }
     }
@@ -231,5 +281,12 @@
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.4.0"
-  }
+  },
+  "contributors": [
+    {
+      "name": "Krzysztof Zander",
+      "email": "krzysztof.zander@retencja.pl",
+      "url": "https://github.com/KrzysztofZander"
+    }
+  ]
 }

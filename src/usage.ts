@@ -202,6 +202,12 @@ export class UsagePoller {
       return;
     }
 
+    // API-provider profiles have no OAuth usage endpoint to poll. Third-party endpoints do not
+    // serve /api/oauth/usage at all, so polling them would only produce a wall of auth errors.
+    if (profile.kind === "api") {
+      return;
+    }
+
     // Backoff: if we recently got a 429, do not retry (unless forced).
     if (!force && profile.lastUsage?.retryAfter && profile.lastUsage.retryAfter > Date.now()) {
       return;

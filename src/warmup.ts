@@ -3,13 +3,16 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { AccountStore } from "./accountStore";
+import { AccountProfile } from "./types";
 import {
   getConfiguredClaudeCommand,
   missingClaudeCliMessage,
   resolveClaudeCommand,
 } from "./cli";
+import { ClaudeSettingsManager } from "./claudeSettings";
 import { hasUsableOAuthCreds } from "./credentialValidation";
 import { CredentialsManager } from "./credentials";
+import { buildProviderEnv } from "./providerEnv";
 import { getAccountConfigDir } from "./isolatedConfig";
 import { withFileLock } from "./lock";
 import { ProfileActivityRegistry } from "./profileActivity";
@@ -32,6 +35,7 @@ export class WarmupService {
     private readonly context: vscode.ExtensionContext,
     private readonly store: AccountStore,
     private readonly credentials: CredentialsManager,
+    private readonly settings: ClaudeSettingsManager,
     private readonly profileActivity?: ProfileActivityRegistry
   ) {}
 
@@ -43,6 +47,10 @@ export class WarmupService {
     const profile = this.store.get(id);
     if (!profile) {
       return { ok: false, message: "Profile not found." };
+    }
+
+    if (profile.kind === "api") {
+      return this.testProvider(profile);
     }
 
     const currentFileProfileId = await this.findCurrentFileProfileId();
@@ -99,7 +107,7 @@ export class WarmupService {
         };
       }
 
-      const cfg = vscode.workspace.getConfiguration("claudeSwitcher");
+      const cfg = vscode.workspace.getConfiguration("claudeProviderSwitcher");
       const model = cfg.get<string>("sayHiModel", "haiku").trim() || "haiku";
       const prompt = cfg.get<string>("sayHiPrompt", "Hi").trim() || "Hi";
       const timeoutMs = Math.max(15, cfg.get<number>("sayHiTimeoutSeconds", 120)) * 1000;
@@ -155,6 +163,76 @@ export class WarmupService {
     }
 
     return locked.value ?? { ok: false, message: `Say Hi failed for "${profile.label}".` };
+  }
+
+  /**
+   * Connectivity test for an API-provider profile.
+   *
+   * Runs one throwaway turn against the provider inside its own CLAUDE_CONFIG_DIR, so the base
+   * URL, key and model name are all validated without touching the active configuration. There
+   * is no rotating token here, so unlike a subscription warmup this is safe to run at any time,
+   * including against the currently active profile.
+   */
+  private async testProvider(profile: AccountProfile): Promise<WarmupResult> {
+    if (!profile.provider?.baseUrl.trim()) {
+      return { ok: false, message: `"${profile.label}" has no base URL configured.` };
+    }
+    const apiKey = await this.store.getApiKey(profile.id);
+    if (!apiKey) {
+      return { ok: false, message: `No API key stored for "${profile.label}".` };
+    }
+
+    const configDir = this.getProfileConfigDir(profile.id);
+    fs.mkdirSync(configDir, { recursive: true });
+    const env = buildProviderEnv(profile.provider, apiKey);
+    try {
+      this.settings.applyEnv(env, [], configDir);
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
+
+    const command = resolveClaudeCommand(getConfiguredClaudeCommand());
+    if (!command) {
+      return { ok: false, message: `Test failed: ${missingClaudeCliMessage()}` };
+    }
+
+    const cfg = vscode.workspace.getConfiguration("claudeProviderSwitcher");
+    const prompt = cfg.get<string>("sayHiPrompt", "Hi").trim() || "Hi";
+    const timeoutMs = Math.max(15, cfg.get<number>("sayHiTimeoutSeconds", 120)) * 1000;
+
+    const result = await runClaude(
+      command,
+      ["-p", prompt, "--max-turns", "1", "--no-session-persistence", "--disallowedTools", "*"],
+      { CLAUDE_CONFIG_DIR: configDir },
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd(),
+      timeoutMs
+    );
+
+    const target = profile.provider.model
+      ? `${profile.provider.baseUrl} (${profile.provider.model})`
+      : profile.provider.baseUrl;
+
+    if (result.timedOut) {
+      return {
+        ok: false,
+        message: `"${profile.label}" did not respond within ${Math.round(timeoutMs / 1000)}s at ${target}.`,
+      };
+    }
+    if (result.code !== 0) {
+      const details = (result.stderr || result.stdout).trim().slice(0, 400);
+      return {
+        ok: false,
+        message:
+          `"${profile.label}" test failed against ${target}` +
+          (details ? `: ${details}` : ` with exit code ${result.code ?? "unknown"}.`),
+      };
+    }
+
+    const reply = result.stdout.trim().replace(/\s+/g, " ").slice(0, 120);
+    return {
+      ok: true,
+      message: `"${profile.label}" works — ${target} replied${reply ? `: ${reply}` : "."}`,
+    };
   }
 
   private async findCurrentFileProfileId(): Promise<string | undefined> {

@@ -4,11 +4,19 @@ import {
   sameNonEmptyToken,
   shouldPreferCredentialCandidate,
 } from "./credentialValidation";
-import { AccountProfile, ClaudeAuthIdentity, OAuthCreds, UsageSnapshot } from "./types";
+import {
+  AccountProfile,
+  ClaudeAuthIdentity,
+  OAuthCreds,
+  ProviderConfig,
+  UsageSnapshot,
+} from "./types";
 
-const PROFILES_KEY = "claudeSwitcher.profiles";
-const ACTIVE_KEY = "claudeSwitcher.activeId";
-const SECRET_PREFIX = "claudeSwitcher.account.";
+const PROFILES_KEY = "claudeProviderSwitcher.profiles";
+const ACTIVE_KEY = "claudeProviderSwitcher.activeId";
+const SECRET_PREFIX = "claudeProviderSwitcher.account.";
+const API_KEY_PREFIX = "claudeProviderSwitcher.apiKey.";
+const MANAGED_ENV_KEY = "claudeProviderSwitcher.managedEnvKeys";
 
 /**
  * Stores account profiles. Metadata (list, order, last usage snapshot) is kept in
@@ -85,10 +93,82 @@ export class AccountStore {
     return profile;
   }
 
+  private apiKeyKey(id: string): string {
+    return API_KEY_PREFIX + id;
+  }
+
+  /** The provider API key for an `api` profile, from encrypted SecretStorage. */
+  async getApiKey(id: string): Promise<string | null> {
+    const raw = await this.context.secrets.get(this.apiKeyKey(id));
+    return raw ?? null;
+  }
+
+  async setApiKey(id: string, apiKey: string): Promise<void> {
+    await this.context.secrets.store(this.apiKeyKey(id), apiKey);
+  }
+
+  /** Creates a third-party API-provider profile. Does not make it active. */
+  async addProviderProfile(
+    label: string,
+    provider: ProviderConfig,
+    apiKey: string
+  ): Promise<AccountProfile> {
+    const profiles = this.profiles;
+    const maxOrder = profiles.reduce((m, p) => Math.max(m, p.order), -1);
+    const profile: AccountProfile = {
+      id: crypto.randomUUID(),
+      label,
+      kind: "api",
+      provider,
+      addedAt: Date.now(),
+      order: maxOrder + 1,
+    };
+    profiles.push(profile);
+    await this.saveProfiles(profiles);
+    await this.setApiKey(profile.id, apiKey);
+    return profile;
+  }
+
+  async updateProvider(id: string, provider: ProviderConfig): Promise<void> {
+    const profiles = this.profiles;
+    const p = profiles.find((x) => x.id === id);
+    if (p && p.kind === "api") {
+      p.provider = provider;
+      await this.saveProfiles(profiles);
+    }
+  }
+
+  async setCompatGroup(id: string, group: string | undefined): Promise<void> {
+    const profiles = this.profiles;
+    const p = profiles.find((x) => x.id === id);
+    if (p) {
+      const trimmed = group?.trim();
+      if (trimmed) {
+        p.compatGroup = trimmed;
+      } else {
+        delete p.compatGroup;
+      }
+      await this.saveProfiles(profiles);
+    }
+  }
+
+  /**
+   * Env keys this extension last wrote into settings.json, so the next switch clears exactly
+   * those and leaves hand-written entries alone.
+   */
+  getManagedEnvKeys(): string[] {
+    return this.context.globalState.get<string[]>(MANAGED_ENV_KEY, []);
+  }
+
+  async setManagedEnvKeys(keys: readonly string[]): Promise<void> {
+    await this.context.globalState.update(MANAGED_ENV_KEY, [...keys]);
+  }
+
   async remove(id: string): Promise<void> {
     const profiles = this.profiles.filter((p) => p.id !== id);
     await this.saveProfiles(profiles);
     await this.context.secrets.delete(this.secretKey(id));
+    await this.context.secrets.delete(this.apiKeyKey(id));
     if (this.getActiveId() === id) {
       await this.setActiveId(undefined);
     }
@@ -145,7 +225,7 @@ export class AccountStore {
     }
 
     return this.profiles.find((p) => {
-      if (p.id === exceptId) {
+      if (p.id === exceptId || p.kind === "api") {
         return false;
       }
       const profileOrgId = normalizeIdentityValue(p.authOrgId);
@@ -179,7 +259,7 @@ export class AccountStore {
 
   /** Finds a profile with matching tokens (to detect duplicates / the active one). */
   async findByTokens(creds: OAuthCreds): Promise<string | undefined> {
-    for (const p of this.profiles) {
+    for (const p of this.profiles.filter((x) => x.kind !== "api")) {
       const stored = await this.getCreds(p.id);
       if (
         stored &&

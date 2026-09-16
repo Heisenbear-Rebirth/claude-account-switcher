@@ -5,7 +5,7 @@ import * as vscode from "vscode";
 const DEFAULT_COMMAND = "claude";
 
 export function getConfiguredClaudeCommand(): string {
-  const cfg = vscode.workspace.getConfiguration("claudeSwitcher");
+  const cfg = vscode.workspace.getConfiguration("claudeProviderSwitcher");
   return stripWrappingQuotes(cfg.get<string>("claudeCommand", DEFAULT_COMMAND).trim()) || DEFAULT_COMMAND;
 }
 
@@ -29,7 +29,7 @@ export function resolveClaudeCommand(command: string): string | undefined {
 export function missingClaudeCliMessage(): string {
   return [
     "Claude Code CLI was not found.",
-    "Install Claude Code, restart VS Code so PATH is refreshed, or set claudeSwitcher.claudeCommand to the full path of claude/claude.cmd.",
+    "Install Claude Code, restart VS Code so PATH is refreshed, or set claudeProviderSwitcher.claudeCommand to the full path of claude/claude.cmd.",
     "On Windows the command is often in %APPDATA%\\npm\\claude.cmd or %LOCALAPPDATA%\\Microsoft\\WinGet\\Links\\claude.exe.",
   ].join(" ");
 }

@@ -3,6 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { AccountStore } from "./accountStore";
+import { ClaudeSettingsManager } from "./claudeSettings";
+import { buildProviderEnv } from "./providerEnv";
+import { AccountProfile } from "./types";
 import {
   hasUsableOAuthCreds,
   shouldPreferCredentialCandidate,
@@ -26,6 +29,7 @@ export class AccountWindowService {
     private readonly context: vscode.ExtensionContext,
     private readonly store: AccountStore,
     private readonly credentials: CredentialsManager,
+    private readonly settings: ClaudeSettingsManager,
     private readonly profileActivity?: ProfileActivityRegistry
   ) {}
 
@@ -41,6 +45,10 @@ export class AccountWindowService {
         ok: false,
         message: "Open a folder or workspace first, then open an independent account window.",
       };
+    }
+
+    if (profile.kind === "api") {
+      return this.openProviderWindow(profile, workspaceFolders);
     }
 
     let creds = await this.store.getCreds(id);
@@ -91,6 +99,51 @@ export class AccountWindowService {
     return { ok: true, message: `Opened "${profile.label}" in an independent VS Code window.` };
   }
 
+  /**
+   * Independent window for an API provider: its own CLAUDE_CONFIG_DIR carrying the provider env.
+   *
+   * Because settings.json lives inside CLAUDE_CONFIG_DIR, this window talks to the provider while
+   * every other window keeps whatever it already had - so a DeepSeek window and a Claude
+   * subscription window can run side by side. Their conversation histories are separate too,
+   * which conveniently removes any chance of resuming one under the other.
+   */
+  private async openProviderWindow(
+    profile: AccountProfile,
+    workspaceFolders: readonly vscode.WorkspaceFolder[]
+  ): Promise<AccountWindowResult> {
+    if (!profile.provider?.baseUrl.trim()) {
+      return { ok: false, message: `"${profile.label}" has no base URL configured.` };
+    }
+    const apiKey = await this.store.getApiKey(profile.id);
+    if (!apiKey) {
+      return { ok: false, message: `No API key stored for "${profile.label}".` };
+    }
+
+    const configDir = getAccountConfigDir(this.context, profile.id);
+    fs.mkdirSync(configDir, { recursive: true });
+    try {
+      this.settings.applyEnv(buildProviderEnv(profile.provider, apiKey), [], configDir);
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
+
+    const workspacePath = this.getWorkspacePath(profile.id, workspaceFolders);
+    fs.mkdirSync(path.dirname(workspacePath), { recursive: true });
+    fs.writeFileSync(
+      workspacePath,
+      JSON.stringify(this.createWorkspaceFile(workspaceFolders, configDir), null, 2),
+      "utf8"
+    );
+
+    await vscode.commands.executeCommand(
+      "vscode.openFolder",
+      vscode.Uri.file(workspacePath),
+      true
+    );
+
+    return { ok: true, message: `Opened "${profile.label}" in an independent VS Code window.` };
+  }
+
   private createWorkspaceFile(
     folders: readonly vscode.WorkspaceFolder[],
     configDir: string
@@ -104,7 +157,7 @@ export class AccountWindowService {
             value: configDir,
           },
         ],
-        "claudeSwitcher.credentialsPath": this.credentials.getCredentialsPath(configDir),
+        "claudeProviderSwitcher.credentialsPath": this.credentials.getCredentialsPath(configDir),
       },
     };
   }

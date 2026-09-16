@@ -160,3 +160,42 @@ button.primary:hover {
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* --- API provider profiles ------------------------------------------------ */
+
+.badge.provider {
+  background: var(--vscode-charts-purple, #8957e5);
+  color: #fff;
+}
+
+.sub.endpoint {
+  font-family: var(--vscode-editor-font-family, monospace);
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+/*
+ * Conversation-compatibility marker. Cards sharing a colour address the same endpoint with the
+ * same model and may be swapped mid-conversation; a different colour needs a new conversation.
+ */
+.compat-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 2px;
+  cursor: pointer;
+  border: 1px solid var(--vscode-editorWidget-border, transparent);
+}
+
+.compat-0 { background: var(--vscode-charts-blue, #3794ff); }
+.compat-1 { background: var(--vscode-charts-green, #89d185); }
+.compat-2 { background: var(--vscode-charts-orange, #d18616); }
+.compat-3 { background: var(--vscode-charts-purple, #b180d7); }
+.compat-4 { background: var(--vscode-charts-red, #f14c4c); }
+.compat-5 { background: var(--vscode-charts-yellow, #cca700); }
+
+/* The toolbar now carries two "add" actions, so let it wrap on narrow panels. */
+#toolbar {
+  flex-wrap: wrap;
+}
