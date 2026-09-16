@@ -14,6 +14,12 @@ import { compatKey, findProfileForEnv, isCompatible, normalizeBaseUrl, OAUTH_COM
 import { readLastModel, sanitizeCwd, scanSessions } from "../src/sessionScan";
 import { shouldWarnOnSwitch } from "../src/sessionGuard";
 import { getPreset } from "../src/providerPresets";
+import {
+  collectUpstreamAccounts,
+  findUpstreamDir,
+  readUpstreamCreds,
+  readUpstreamProfiles,
+} from "../src/importUpstream";
 import { AccountProfile, ProviderConfig } from "../src/types";
 
 let failures = 0;
@@ -763,6 +769,117 @@ function runSessionScanTests(): void {
   check("default mode warns when sessions exist", shouldWarnOnSwitch("whenSessionsExist", some));
 }
 
+
+function runImportUpstreamTests(): void {
+  console.log("Upstream import:");
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cas-import-"));
+  const gs = path.join(root, "globalStorage");
+  const upstream = path.join(gs, "krzysztofzander.claude-code-account-switcher");
+  const configs = path.join(upstream, "account-configs");
+  fs.mkdirSync(configs, { recursive: true });
+  const context = {
+    globalStorageUri: { fsPath: path.join(gs, "heisenbear-rebirth.claude-code-multi-provider-switcher") },
+  } as never;
+
+  const creds = (refresh: string, refreshExpiresAt?: number) => ({
+    claudeAiOauth: {
+      accessToken: "access-" + refresh,
+      refreshToken: refresh,
+      expiresAt: Date.now() + 3600_000,
+      refreshTokenExpiresAt: refreshExpiresAt,
+      scopes: ["user:inference"],
+      subscriptionType: "pro",
+    },
+  });
+
+  const idA = "aaaaaaaa-0000-0000-0000-000000000001";
+  const idB = "bbbbbbbb-0000-0000-0000-000000000002";
+  const idC = "cccccccc-0000-0000-0000-000000000003";
+  for (const id of [idA, idB, idC]) fs.mkdirSync(path.join(configs, id));
+
+  // A: normal live credentials.
+  fs.writeFileSync(path.join(configs, idA, ".credentials.json"), JSON.stringify(creds("refresh-A")));
+  // B: no live file, an expired backup and a newer valid one.
+  fs.writeFileSync(
+    path.join(configs, idB, ".credentials.json.reauth-backup-20250101000000"),
+    JSON.stringify(creds("refresh-B-old", Date.now() - 86400_000))
+  );
+  fs.writeFileSync(
+    path.join(configs, idB, ".credentials.json.reauth-backup-20260101000000"),
+    JSON.stringify(creds("refresh-B-new", Date.now() + 86400_000))
+  );
+  // C: nothing usable at all.
+  fs.writeFileSync(path.join(configs, idC, ".credentials.json.reauth-backup-20250101000000"), "{ broken");
+
+  // A state database is mostly binary; the value is a JSON string embedded in a page. A label
+  // containing a bracket guards the string-aware matcher.
+  const blob = JSON.stringify({
+    "claudeSwitcher.profiles": [
+      { id: idA, label: "Work [main]", order: 1, subscriptionType: "pro", authEmail: "a@example.com" },
+      { id: idB, label: "Personal", order: 0 },
+      { id: idC, label: "Broken", order: 2 },
+    ],
+  });
+  const stale = JSON.stringify({ "claudeSwitcher.profiles": [{ id: idA, label: "Old name", order: 0 }] });
+  fs.writeFileSync(
+    path.join(gs, "state.vscdb"),
+    Buffer.concat([
+      Buffer.from([0, 1, 2, 255, 254]),
+      Buffer.from(stale, "utf8"),
+      Buffer.from([0, 0, 7]),
+      Buffer.from(blob, "utf8"),
+      Buffer.from([0, 9]),
+    ])
+  );
+
+  check("locates the upstream storage directory", findUpstreamDir(context) === upstream);
+
+  const profiles = readUpstreamProfiles(context);
+  check("recovers every profile from the state database", profiles.length === 3);
+  check(
+    "prefers the richest generation over a stale page",
+    profiles.find((p) => p.id === idA)?.label === "Work [main]"
+  );
+  check(
+    "bracket inside a label does not truncate the scan",
+    profiles.some((p) => p.label === "Broken")
+  );
+  check("carries identity metadata across", profiles.find((p) => p.id === idA)?.authEmail === "a@example.com");
+
+  check(
+    "live credentials win over backups",
+    readUpstreamCreds(upstream, idA)?.creds.refreshToken === "refresh-A"
+  );
+  check("live credentials are not flagged as backups", readUpstreamCreds(upstream, idA)?.fromBackup === false);
+  check(
+    "falls back to the newest unexpired backup",
+    readUpstreamCreds(upstream, idB)?.creds.refreshToken === "refresh-B-new"
+  );
+  check("backup recovery is flagged", readUpstreamCreds(upstream, idB)?.fromBackup === true);
+  check("unusable profile yields nothing", readUpstreamCreds(upstream, idC) === undefined);
+
+  const collected = collectUpstreamAccounts(context)!;
+  check("collects only importable accounts", collected.accounts.length === 2);
+  check("reports the unusable profile by name", collected.unavailable.includes("Broken"));
+  check(
+    "respects upstream ordering",
+    collected.accounts[0].label === "Personal" && collected.accounts[1].label === "Work [main]"
+  );
+  check(
+    "identity is carried onto the imported account",
+    collected.accounts[1].identity?.email === "a@example.com"
+  );
+
+  // No upstream installation at all must be reported as such, not as an empty import.
+  const bare = fs.mkdtempSync(path.join(os.tmpdir(), "cas-noimport-"));
+  const bareContext = { globalStorageUri: { fsPath: path.join(bare, "globalStorage", "me") } } as never;
+  check("absent upstream is distinguishable from an empty one", collectUpstreamAccounts(bareContext) === undefined);
+
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.rmSync(bare, { recursive: true, force: true });
+}
+
 async function runTokenRefresherTests(): Promise<void> {
   console.log("TokenRefresher:");
   const originalFetch = globalThis.fetch;
@@ -868,6 +985,7 @@ runAccountStoreTests()
   .then(runCompatTests)
   .then(runActiveResolutionTests)
   .then(runSessionScanTests)
+  .then(runImportUpstreamTests)
   .then(runTokenRefresherTests)
   .then(() => {
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

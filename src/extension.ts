@@ -22,6 +22,7 @@ import {
   runEditProviderWizard,
 } from "./providerWizard";
 import { getAccountConfigDir } from "./isolatedConfig";
+import { collectUpstreamAccounts, importFromUpstream, ImportSummary } from "./importUpstream";
 import { TokenRefresher } from "./oauth";
 import { ProfileActivityRegistry } from "./profileActivity";
 import { SwitchService } from "./switchService";
@@ -360,6 +361,42 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  const runUpstreamImport = async (silentWhenEmpty = false) => {
+    const summary = await importFromUpstream(context, store, credentials);
+    if (!summary) {
+      if (!silentWhenEmpty) {
+        vscode.window.showInformationMessage(
+          "No claude-account-switcher data found on this machine. Nothing to import."
+        );
+      }
+      return;
+    }
+    profileActivity.setActiveProfile(store.getActiveId());
+    refreshUI();
+
+    if (summary.imported.length === 0 && !silentWhenEmpty) {
+      vscode.window.showInformationMessage(
+        summary.skipped.length > 0
+          ? `Nothing new to import — ${summary.skipped.length} profile(s) are already here.`
+          : "No importable profiles were found."
+      );
+    } else if (summary.imported.length > 0) {
+      vscode.window.showInformationMessage(describeImport(summary));
+      const activeId = store.getActiveId();
+      if (activeId) {
+        await poller.pollOne(activeId, true);
+        refreshUI();
+      }
+    }
+  };
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "claudeProviderSwitcher.importFromUpstream",
+      () => void runUpstreamImport()
+    )
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeProviderSwitcher.addProviderProfile", async () => {
       const profile = await runAddProviderWizard(store);
@@ -628,11 +665,32 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  /** First run after installing alongside upstream: offer to bring the saved accounts over. */
+  const offerUpstreamImport = async () => {
+    if (store.list().length > 0) {
+      return;
+    }
+    const collected = collectUpstreamAccounts(context);
+    if (!collected || collected.accounts.length === 0) {
+      return;
+    }
+    const choice = await vscode.window.showInformationMessage(
+      `Found ${collected.accounts.length} saved account(s) in claude-account-switcher. ` +
+        "Import them into this extension? The original extension is left untouched.",
+      "Import",
+      "Not now"
+    );
+    if (choice === "Import") {
+      await runUpstreamImport(true);
+    }
+  };
+
   void synchronizeCurrentProfile()
     .catch(() => undefined)
-    .then(() => {
+    .then(async () => {
       refreshUI();
       poller.start();
+      await offerUpstreamImport().catch(() => undefined);
     });
 }
 
@@ -759,6 +817,25 @@ async function pickWindowTargets(store: AccountStore): Promise<string[] | undefi
     matchOnDescription: true,
   });
   return picked?.ids;
+}
+
+function describeImport(summary: ImportSummary): string {
+  const parts = [`Imported ${summary.imported.length} profile(s): ${summary.imported.join(", ")}.`];
+  if (summary.activeLabel) {
+    parts.push(`"${summary.activeLabel}" matches the current login and is marked active.`);
+  }
+  if (summary.skipped.length > 0) {
+    parts.push(`Skipped ${summary.skipped.length} already present.`);
+  }
+  if (summary.fromBackup.length > 0) {
+    parts.push(
+      `Recovered from a reauth backup (may need reauthorization): ${summary.fromBackup.join(", ")}.`
+    );
+  }
+  if (summary.unavailable.length > 0) {
+    parts.push(`No usable credentials found for: ${summary.unavailable.join(", ")}.`);
+  }
+  return parts.join(" ");
 }
 
 function describeEndpoint(profile: AccountProfile): string {

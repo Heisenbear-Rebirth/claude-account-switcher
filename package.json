@@ -141,6 +141,11 @@
         "command": "claudeProviderSwitcher.setCompatGroup",
         "title": "Claude: Set conversation compatibility group",
         "icon": "$(link)"
+      },
+      {
+        "command": "claudeProviderSwitcher.importFromUpstream",
+        "title": "Claude: Import profiles from claude-account-switcher",
+        "icon": "$(cloud-download)"
       }
     ],
     "menus": {
@@ -198,6 +203,9 @@
         },
         {
           "command": "claudeProviderSwitcher.setCompatGroup"
+        },
+        {
+          "command": "claudeProviderSwitcher.importFromUpstream"
         }
       ]
     },
