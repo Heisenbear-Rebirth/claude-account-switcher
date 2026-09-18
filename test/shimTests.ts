@@ -39,6 +39,7 @@ export async function runShimTests(check: Check): Promise<void> {
   streamTranslationTests(check);
   serverUnitTests(check);
   await endToEndTests(check);
+  await retryTests(check);
 }
 
 // ── ReasoningStore ─────────────────────────────────────────────────────────
@@ -558,4 +559,94 @@ function activeResolutionTests(check: Check): void {
     "the same upstream and model stay compatible",
     compatKey(a) === compatKey(shimProfile("shim-a-copy", "gpt-6-astra", "https://relay-a.invalid/v1"))
   );
+}
+
+// ── transient upstream failures ────────────────────────────────────────────
+
+async function retryTests(check: Check): Promise<void> {
+  console.log("Shim / upstream retry:");
+
+  let attempts = 0;
+  let plan: Array<{ status: number; body?: string }> = [];
+
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const step = plan[Math.min(attempts, plan.length - 1)];
+      attempts += 1;
+      if (step.status !== 200) {
+        res.writeHead(step.status, { "content-type": "application/json" });
+        res.end(step.body ?? '{"error":{"message":"transient"}}');
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(`data: ${JSON.stringify({ type: "response.created" })}
+
+`);
+      res.write(`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "RECOVERED" })}
+
+`);
+      res.write(`data: ${JSON.stringify({ type: "response.completed", response: {} })}
+
+`);
+      res.end();
+    });
+  });
+  await new Promise<void>((r) => upstream.listen(0, "127.0.0.1", () => r()));
+  const port = (upstream.address() as { port: number }).port;
+
+  const shim = new OpenAiShim();
+  const endpoint = await shim.start();
+  shim.setTarget({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "k", fallbackModel: "m" });
+
+  const ask = async () => {
+    const r = await fetch(`${endpoint.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${endpoint.token}` },
+      body: JSON.stringify({ model: "m", max_tokens: 64, messages: [user("hi")] }),
+    });
+    return { status: r.status, body: (await r.json()) as Record<string, unknown> };
+  };
+
+  try {
+    // A flaky prompt-audit service: two 503s, then the real answer.
+    attempts = 0;
+    plan = [{ status: 503 }, { status: 503 }, { status: 200 }];
+    const recovered = await ask();
+    const content = recovered.body.content as Array<Record<string, unknown>> | undefined;
+    check("a transient 503 is retried until it succeeds", recovered.status === 200);
+    check("the recovered reply reaches the client", content?.some((b) => b.text === "RECOVERED") === true);
+    check("recovery took exactly three upstream attempts", attempts === 3);
+
+    // A bad request is the caller's fault; retrying would only burn pool time.
+    attempts = 0;
+    plan = [{ status: 400, body: '{"error":{"message":"model not found"}}' }];
+    const rejected = await ask();
+    check("a 400 is not retried", attempts === 1);
+    check("the upstream 400 status is passed through", rejected.status === 400);
+    check(
+      "the upstream error detail is surfaced",
+      JSON.stringify(rejected.body).includes("model not found")
+    );
+
+    // Persistent failure must give up rather than hammer the pool.
+    attempts = 0;
+    plan = [{ status: 503, body: '{"error":{"message":"still down"}}' }];
+    const gaveUp = await ask();
+    check("a persistent 503 stops after three attempts", attempts === 3);
+    check("giving up reports the upstream status", gaveUp.status === 503);
+    check("giving up reports the upstream detail", JSON.stringify(gaveUp.body).includes("still down"));
+
+    check("429 is treated as transient", isTransientStatus(429));
+    check("401 is not treated as transient", !isTransientStatus(401));
+  } finally {
+    await shim.stop();
+    upstream.closeAllConnections?.();
+    await new Promise<void>((r) => upstream.close(() => r()));
+  }
+}
+
+/** Mirrors the shim's own predicate; kept here so the intent is asserted, not just the behaviour. */
+function isTransientStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504);
 }

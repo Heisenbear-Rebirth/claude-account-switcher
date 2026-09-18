@@ -153,6 +153,15 @@ address and a token that is worthless anywhere else. Conversation compatibility 
 real upstream, so two different relays behind the same local port are never treated as
 interchangeable mid-conversation.
 
+### Transient failures are retried
+
+A gateway sharing one account pool between users fails intermittently in ways a direct API does not
+— one relay tested here returns 503 from its prompt-audit service often enough to look broken. The
+bridge retries up to three times, but only while nothing has been generated yet: re-sending is free
+in that window because the request is stateless and the pool did no work, whereas replaying a stream
+that died mid-reply would charge twice for an answer you have already partly seen. A 4xx is never
+retried; that is your configuration, not the weather.
+
 ### Requests are always streamed upstream
 
 Whatever Claude Code asks for, the bridge streams. A non-streaming request would hold a pooled

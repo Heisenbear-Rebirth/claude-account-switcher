@@ -23,6 +23,12 @@
   upstream URL and key; the `env` block gets a loopback address and a token that is useless off this
   machine. Conversation compatibility still keys on the real upstream, so two relays behind the same
   local port are never treated as interchangeable.
+- **Transient upstream failures are retried**, up to three attempts, and only while nothing has
+  been generated yet. Gateways fronting a shared account pool fail intermittently — a flaky
+  prompt-audit service returning 503 is the case this was written for, and against one such relay
+  it turned a mostly-failing endpoint into a reliable one. Re-POSTing is safe because the request
+  is `store: false`; a 4xx is never retried, and a stream that dies mid-reply is surfaced rather
+  than replayed.
 - Upstream requests are always streamed, whatever the client asked for. A non-streaming request
   holds a pooled account open with no bytes flowing, which relay operators reject; a client wanting
   one JSON body gets it by aggregating locally instead.

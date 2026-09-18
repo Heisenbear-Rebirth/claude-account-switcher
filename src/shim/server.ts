@@ -154,15 +154,7 @@ export class OpenAiShim {
 
     let upstream: Response;
     try {
-      upstream = await fetch(`${normalizeBase(target.baseUrl)}/responses`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${target.apiKey}`,
-          accept: "text/event-stream",
-        },
-        body: JSON.stringify(request),
-      });
+      upstream = await this.fetchUpstream(target, JSON.stringify(request));
     } catch (err) {
       this.fail(res, 502, `upstream unreachable: ${describe(err)}`, "api_error");
       return;
@@ -221,6 +213,56 @@ export class OpenAiShim {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify((sink as MessageSink).toMessage()));
     }
+  }
+
+  /**
+   * POSTs the upstream request, retrying only while nothing has been generated yet.
+   *
+   * Gateways in front of a shared account pool fail transiently — a flaky prompt-audit service
+   * returning 503 is the case this was written for. Re-POSTing the identical body is safe because
+   * the request is `store: false`, so it left no state behind, and a request rejected before
+   * generation started cost the pool nothing. Retries stop as soon as bytes are flowing: a stream
+   * that dies mid-reply is surfaced to the client instead, since replaying it would double the
+   * upstream work for a reply the client has already partly seen.
+   */
+  private async fetchUpstream(target: ShimTarget, payload: string): Promise<Response> {
+    const url = `${normalizeBase(target.baseUrl)}/responses`;
+    const attempts = 3;
+    let lastStatus = 0;
+    let lastBody = "";
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${target.apiKey}`,
+            accept: "text/event-stream",
+          },
+          body: payload,
+        });
+      } catch (err) {
+        if (attempt === attempts) {
+          throw err;
+        }
+        this.log(`upstream connect failed (${attempt}/${attempts}): ${describe(err)}`);
+        await delay(attempt * 400);
+        continue;
+      }
+
+      if (res.ok || !isTransient(res.status) || attempt === attempts) {
+        return res;
+      }
+      lastStatus = res.status;
+      lastBody = await res.text().catch(() => "");
+      this.log(`upstream ${res.status} (${attempt}/${attempts}), retrying: ${trim(lastBody)}`);
+      await delay(attempt * 400);
+    }
+
+    // Unreachable in practice; keeps the signature honest.
+    return new Response(lastBody, { status: lastStatus || 502 });
   }
 
   private authorized(req: http.IncomingMessage): boolean {
@@ -370,4 +412,13 @@ function describe(err: unknown): string {
 function trim(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > 300 ? `${flat.slice(0, 300)}…` : flat;
+}
+
+/** Upstream statuses worth one more attempt: congestion or a flaky dependency, not a bad request. */
+function isTransient(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 504);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
