@@ -14,6 +14,7 @@ import { compatKey, findProfileForEnv, isCompatible, normalizeBaseUrl, OAUTH_COM
 import { readLastModel, sanitizeCwd, scanSessions } from "../src/sessionScan";
 import { shouldWarnOnSwitch } from "../src/sessionGuard";
 import { getPreset } from "../src/providerPresets";
+import { runShimTests } from "./shimTests";
 import {
   collectUpstreamAccounts,
   findUpstreamDir,
@@ -880,6 +881,80 @@ function runImportUpstreamTests(): void {
   fs.rmSync(bare, { recursive: true, force: true });
 }
 
+
+async function runShimSwitchTests(): Promise<void> {
+  console.log("Shim switch integration:");
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cas-shim-switch-"));
+  process.env.TEST_CRED_PATH = path.join(tmpDir, ".credentials.json");
+
+  const store = createStore();
+  const manager = new CredentialsManager();
+  const settings = new ClaudeSettingsManager(manager);
+
+  const UPSTREAM_KEY = "secret-upstream-key-do-not-leak";
+  const profile = await store.addProviderProfile(
+    "OpenAI relay",
+    {
+      presetId: "openaiRelay",
+      baseUrl: "https://relay.invalid/v1",
+      authStyle: "authToken",
+      model: "gpt-6-astra",
+      // The wizard fills these in; set them here so this test covers the shim path rather than
+      // re-testing the wizard.
+      opusModel: "gpt-6-astra",
+      sonnetModel: "gpt-6-astra",
+      haikuModel: "gpt-5.4-mini",
+      wireFormat: "openaiResponses",
+      defaultEffort: "high",
+    },
+    UPSTREAM_KEY
+  );
+
+  let seen: { baseUrl: string; apiKey: string; fallbackModel?: string; defaultEffort?: string } | undefined;
+  const fakeShim = {
+    ensure: async (target: typeof seen & object) => {
+      seen = target;
+      return { baseUrl: "http://127.0.0.1:41234", token: "loopback-token" };
+    },
+  };
+
+  const service = new SwitchService(store, manager, settings, fakeShim as never);
+  const result = await service.switchTo(profile.id);
+  check("switching to an OpenAI-format profile succeeds", result.ok);
+
+  const env = settings.readEnv();
+  const written = JSON.stringify(settings.readSettings() ?? {});
+  check("Claude Code is pointed at the loopback shim", env.ANTHROPIC_BASE_URL === "http://127.0.0.1:41234");
+  check("the token written is the shim's, not the provider's", env.ANTHROPIC_AUTH_TOKEN === "loopback-token");
+  check("the upstream key never reaches settings.json", !written.includes(UPSTREAM_KEY));
+  check("the upstream host never reaches settings.json", !written.includes("relay.invalid"));
+  check("the shim is told the real endpoint and key", seen?.baseUrl === "https://relay.invalid/v1" && seen?.apiKey === UPSTREAM_KEY);
+  check("the effort default is passed to the shim", seen?.defaultEffort === "high");
+  check("model aliases still name the upstream model", env.ANTHROPIC_MODEL === "gpt-6-astra");
+  check("tier aliases are remapped away from Claude names", env.ANTHROPIC_DEFAULT_SONNET_MODEL === "gpt-6-astra");
+
+  // A window without the shim must refuse rather than pin an endpoint nothing is listening on.
+  // Needs a profile that is not already active, or switchTo short-circuits as a no-op.
+  const second = await store.addProviderProfile(
+    "Another relay",
+    {
+      presetId: "openaiRelay",
+      baseUrl: "https://other.invalid/v1",
+      authStyle: "authToken",
+      model: "gpt-6",
+      wireFormat: "openaiResponses",
+    },
+    "another-key"
+  );
+  await store.setActiveId(profile.id);
+  const orphaned = new SwitchService(store, manager, settings);
+  const refused = await orphaned.switchTo(second.id);
+  check("the switch refuses when no shim is available", !refused.ok && /shim/i.test(refused.message));
+
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+}
+
 async function runTokenRefresherTests(): Promise<void> {
   console.log("TokenRefresher:");
   const originalFetch = globalThis.fetch;
@@ -986,10 +1061,14 @@ runAccountStoreTests()
   .then(runActiveResolutionTests)
   .then(runSessionScanTests)
   .then(runImportUpstreamTests)
+  .then(() => runShimTests(check))
+  .then(runShimSwitchTests)
   .then(runTokenRefresherTests)
   .then(() => {
     console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
-    process.exit(failures === 0 ? 0 : 1);
+    // Set the code and let Node drain its own handles. Calling process.exit() here raced with
+    // keep-alive sockets left behind by fetch and tripped a libuv assertion on Windows.
+    process.exitCode = failures === 0 ? 0 : 1;
   })
   .catch((e) => {
     console.error(e);

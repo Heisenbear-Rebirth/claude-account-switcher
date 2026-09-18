@@ -110,6 +110,56 @@ budgets and compare `usage.output_tokens_details.thinking_tokens`; if the number
 request, the budget is being dropped.
 
 
+## OpenAI-format endpoints
+
+Not every gateway speaks Anthropic. A Codex relay typically answers only on `/v1/responses`, and
+asking it for `/v1/messages` returns a flat refusal — no amount of configuration helps, because the
+endpoint simply is not there.
+
+Those endpoints still work here. Choose the **OpenAI-format relay / Codex gateway** preset and the
+extension routes Claude Code through a loopback bridge:
+
+```
+Claude Code ──Anthropic──► 127.0.0.1:<port> ──OpenAI Responses──► your gateway
+```
+
+The bridge runs inside the extension host — no child process, no extra dependency — and binds a port
+only once you switch to a profile that needs it.
+
+### Reasoning has to be carried by hand
+
+A reasoning model's chain of thought comes back in an opaque `encrypted_content` blob, and it is
+only useful if the *exact* bytes are replayed on the next turn. Claude Code cannot help here: it
+round-trips Anthropic `thinking` blocks, whose signatures mean nothing to an OpenAI upstream. So the
+bridge keeps the real reasoning on the side and re-injects it next turn, beside the assistant turn
+that produced it.
+
+Two details matter enough to spell out, because both are invisible when they go wrong:
+
+- **Blobs are stored byte-for-byte.** Nothing trims, re-encodes or summarises them. A truncated blob
+  is not a degraded blob — it is a discarded one, and the only symptom is that answers quietly get
+  worse.
+- **Reasoning is addressed by the conversation prefix that produced it.** The obvious shortcut —
+  hashing the first user message — breaks badly here, because Claude Code's first turn carries the
+  CLAUDE.md and memory preamble. Two unrelated conversations in the same project can share that
+  preamble for thousands of characters, land in the same slot, and feed each other's chain of
+  thought. A full-prefix fingerprint cannot collide, and it also lets every assistant turn in the
+  history keep its own reasoning rather than only the newest.
+
+### Your key stays out of settings.json
+
+For these profiles the bridge holds the upstream URL and key, so the `env` block contains a loopback
+address and a token that is worthless anywhere else. Conversation compatibility still keys on the
+real upstream, so two different relays behind the same local port are never treated as
+interchangeable mid-conversation.
+
+### Requests are always streamed upstream
+
+Whatever Claude Code asks for, the bridge streams. A non-streaming request would hold a pooled
+account open with no bytes flowing — which is exactly what gateway operators block, since it wrecks
+the first-token latency of the account pool they share between users. A client that wants a single
+JSON body gets one, aggregated locally from the same stream.
+
 ## How switching works
 
 Two mechanisms, one for each kind of profile:

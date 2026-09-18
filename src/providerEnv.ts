@@ -31,7 +31,8 @@ export const CORE_MANAGED_ENV_KEYS = [
  */
 export function buildProviderEnv(
   provider: ProviderConfig,
-  apiKey: string
+  apiKey: string,
+  shim?: { baseUrl: string; token: string }
 ): Record<string, string> {
   const env: Record<string, string> = {};
 
@@ -42,6 +43,20 @@ export function buildProviderEnv(
     }
   }
 
+  if (provider.wireFormat === "openaiResponses") {
+    if (!shim) {
+      throw new Error(
+        "This profile needs the local OpenAI shim, but it is not running. Try switching again."
+      );
+    }
+    // Claude Code talks to the loopback shim, which holds the real endpoint and key. A side effect
+    // worth having: the provider credential never reaches settings.json — only a token that is
+    // useless off this machine.
+    env.ANTHROPIC_BASE_URL = shim.baseUrl;
+    env.ANTHROPIC_AUTH_TOKEN = shim.token;
+    return withModelAliases(env, provider);
+  }
+
   env.ANTHROPIC_BASE_URL = provider.baseUrl.trim();
 
   if (provider.authStyle === "apiKey") {
@@ -50,13 +65,23 @@ export function buildProviderEnv(
     env.ANTHROPIC_AUTH_TOKEN = apiKey;
   }
 
+  return withModelAliases(env, provider);
+}
+
+/**
+ * Model variables are shared by both wire formats: even behind the shim, Claude Code is the one
+ * that decides which model name to send, so `/model sonnet` has to resolve to a real upstream id.
+ */
+function withModelAliases(
+  env: Record<string, string>,
+  provider: ProviderConfig
+): Record<string, string> {
   setIfPresent(env, "ANTHROPIC_MODEL", provider.model);
   setIfPresent(env, "ANTHROPIC_SMALL_FAST_MODEL", provider.smallFastModel);
   setIfPresent(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", provider.opusModel);
   setIfPresent(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", provider.sonnetModel);
   setIfPresent(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", provider.haikuModel);
   setIfPresent(env, "CLAUDE_CODE_SUBAGENT_MODEL", provider.subagentModel);
-
   return env;
 }
 

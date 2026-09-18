@@ -11,7 +11,16 @@ import {
   shouldWarnOnSwitch,
   WarnMode,
 } from "./sessionGuard";
+import { ShimEndpoint, ShimTarget } from "./shim/server";
 import { AccountProfile } from "./types";
+
+/**
+ * The bit of the loopback shim a switch needs. Narrow on purpose: the service never has to know
+ * whether a real socket is listening, which keeps it testable.
+ */
+export interface ShimController {
+  ensure(target: ShimTarget): Promise<ShimEndpoint>;
+}
 
 export interface SwitchResult {
   ok: boolean;
@@ -32,7 +41,8 @@ export class SwitchService {
   constructor(
     private readonly store: AccountStore,
     private readonly credentials: CredentialsManager,
-    private readonly settings: ClaudeSettingsManager
+    private readonly settings: ClaudeSettingsManager,
+    private readonly shim?: ShimController
   ) {}
 
   /** Saves the currently logged-in account (from the file) as a new profile. */
@@ -197,7 +207,34 @@ export class SwitchService {
       };
     }
 
-    const env = buildProviderEnv(profile.provider, apiKey);
+    // An OpenAI-format endpoint is reached through the loopback shim, which has to be listening
+    // before the env block can name it. Failing here is better than pinning a dead URL.
+    let endpoint: ShimEndpoint | undefined;
+    if (profile.provider.wireFormat === "openaiResponses") {
+      if (!this.shim) {
+        return {
+          ok: false,
+          message: `"${profile.label}" needs the local OpenAI shim, which is unavailable in this window.`,
+        };
+      }
+      try {
+        endpoint = await this.shim.ensure({
+          baseUrl: profile.provider.baseUrl,
+          apiKey,
+          fallbackModel: profile.provider.model,
+          defaultEffort: profile.provider.defaultEffort,
+        });
+      } catch (e) {
+        return { ok: false, message: `Could not start the local shim: ${(e as Error).message}` };
+      }
+    }
+
+    let env: Record<string, string>;
+    try {
+      env = buildProviderEnv(profile.provider, apiKey, endpoint);
+    } catch (e) {
+      return { ok: false, message: (e as Error).message };
+    }
     const clear = keysToClear(this.store.getManagedEnvKeys(), env);
 
     this.settings.backup();

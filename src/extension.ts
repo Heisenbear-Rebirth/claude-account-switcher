@@ -28,6 +28,7 @@ import { ProfileActivityRegistry } from "./profileActivity";
 import { SwitchService } from "./switchService";
 import { AccountsViewProvider } from "./ui/accountsView";
 import { StatusBarController } from "./ui/statusBar";
+import { OpenAiShim } from "./shim/server";
 import { UsagePoller } from "./usage";
 import { AccountProfile, ClaudeAuthIdentity } from "./types";
 import { WarmupService } from "./warmup";
@@ -39,7 +40,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const refresher = new TokenRefresher();
   const browserOAuth = new BrowserOAuthLogin();
   const profileActivity = new ProfileActivityRegistry(context);
-  const switchService = new SwitchService(store, credentials, claudeSettings);
+  // Loopback bridge for OpenAI-format endpoints. Created eagerly but only listens once a profile
+  // that needs it is switched to, so a user with only Anthropic-format providers opens no port.
+  const shimLog = vscode.window.createOutputChannel("Claude Provider Shim");
+  const shim = new OpenAiShim((msg) => shimLog.appendLine(`[${new Date().toISOString()}] ${msg}`));
+  context.subscriptions.push(shimLog);
+  context.subscriptions.push({ dispose: () => void shim.stop() });
+  shimInstance = shim;
+
+  const switchService = new SwitchService(store, credentials, claudeSettings, shim);
   const warmupService = new WarmupService(
     context,
     store,
@@ -142,7 +151,12 @@ export function activate(context: vscode.ExtensionContext): void {
     } catch {
       return undefined;
     }
-    return findProfileForEnv(store.list(), env.ANTHROPIC_BASE_URL, env.ANTHROPIC_MODEL)?.id;
+    return findProfileForEnv(
+      store.list(),
+      env.ANTHROPIC_BASE_URL,
+      env.ANTHROPIC_MODEL,
+      store.getActiveId()
+    )?.id;
   };
 
   const synchronizeCurrentProfile = async () => {
@@ -694,8 +708,13 @@ export function activate(context: vscode.ExtensionContext): void {
     });
 }
 
+/** Held so `deactivate` can close the listening socket even if disposal order surprises us. */
+let shimInstance: OpenAiShim | undefined;
+
 export function deactivate(): void {
-  /* resources are released via context.subscriptions */
+  /* most resources are released via context.subscriptions */
+  void shimInstance?.stop();
+  shimInstance = undefined;
 }
 
 /** Shared account-picker QuickPick with a usage preview. */

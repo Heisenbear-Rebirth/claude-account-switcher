@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0
+
+- **OpenAI-format endpoints.** Some gateways never expose Anthropic's `/v1/messages` at all — a
+  Codex relay, for instance, answers only on `/v1/responses`. Such an endpoint can now back a
+  profile: pick the "OpenAI-format relay / Codex gateway" preset and requests are bridged by a
+  loopback shim that runs inside the extension host. No child process and no new runtime
+  dependency; the shim binds a port only once a profile that needs it is switched to.
+- **Encrypted reasoning survives the bridge.** The Responses API carries a reasoning model's chain
+  of thought in an opaque `encrypted_content` blob that has to be replayed verbatim on the next
+  turn. Claude Code knows nothing about it — it round-trips Anthropic `thinking` blocks, whose
+  signatures mean nothing upstream — so the shim keeps the real state on the side and re-injects it
+  beside the assistant turn that produced it. Blobs are stored byte-for-byte; a 4 KB blob was
+  verified to arrive back unchanged, markers at both ends intact.
+- **Reasoning is addressed by conversation prefix**, not by a hash of the first user turn. The
+  reference implementation this was adapted from keyed on the first turn truncated to 4096
+  characters; because Claude Code's first turn carries the CLAUDE.md / memory preamble, two
+  unrelated conversations in one project could collide and one would receive the other's chain of
+  thought. Reproduced, then designed out. Reasoning also accumulates across turns instead of only
+  the newest one surviving.
+- **Your provider key no longer reaches `settings.json`** for these profiles. The shim holds the
+  upstream URL and key; the `env` block gets a loopback address and a token that is useless off this
+  machine. Conversation compatibility still keys on the real upstream, so two relays behind the same
+  local port are never treated as interchangeable.
+- Upstream requests are always streamed, whatever the client asked for. A non-streaming request
+  holds a pooled account open with no bytes flowing, which relay operators reject; a client wanting
+  one JSON body gets it by aggregating locally instead.
+
 ## 0.3.0
 
 Forked from `KrzysztofZander/claude-account-switcher` 0.2.5, with a new extension id so both can be

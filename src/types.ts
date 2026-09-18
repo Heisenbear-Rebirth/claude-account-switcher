@@ -62,6 +62,20 @@ export interface ProviderConfig {
   subagentModel?: string;
   /** Escape hatch: any other env var this provider wants (timeouts, custom headers, ...). */
   extraEnv?: Record<string, string>;
+  /**
+   * Protocol the endpoint actually speaks.
+   *
+   * Absent or `anthropic` means Claude Code talks to `baseUrl` directly. `openaiResponses` routes
+   * through the extension's built-in loopback shim instead, so an OpenAI-only endpoint — a Codex
+   * relay, for instance — can still back a profile. With the shim in the path, `baseUrl` and the
+   * key are consumed by the shim and never written into settings.json.
+   */
+  wireFormat?: "anthropic" | "openaiResponses";
+  /**
+   * Reasoning effort to request when the client implies none (`openaiResponses` only). Claude
+   * Code's own thinking budget takes precedence whenever it sends one.
+   */
+  defaultEffort?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 /** Profile metadata (no secrets) — kept in globalState. */

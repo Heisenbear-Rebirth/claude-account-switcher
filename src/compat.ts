@@ -98,14 +98,39 @@ export function compatLabel(profile: AccountProfile): string {
 export function findProfileForEnv(
   profiles: readonly AccountProfile[],
   baseUrl: string | undefined,
-  model: string | undefined
+  model: string | undefined,
+  activeId?: string
 ): AccountProfile | undefined {
   if (!baseUrl?.trim()) {
     return undefined;
   }
   const wantedUrl = normalizeBaseUrl(baseUrl);
+
+  // A profile routed through the loopback shim pins the shim's own address, not the provider's, so
+  // settings.json alone cannot say *which* shim profile is live. The recorded active id is the only
+  // thing that can, and it is still cross-checked against what the pin implies.
+  if (isLoopback(wantedUrl)) {
+    const shimProfiles = profiles.filter(
+      (p) => p.kind === "api" && p.provider?.wireFormat === "openaiResponses"
+    );
+    if (shimProfiles.length === 0) {
+      return undefined;
+    }
+    const recorded = shimProfiles.find((p) => p.id === activeId);
+    if (recorded) {
+      return recorded;
+    }
+    const wantedModel = normalizeModel(model);
+    return (
+      shimProfiles.find((p) => normalizeModel(p.provider?.model) === wantedModel) ?? shimProfiles[0]
+    );
+  }
+
   const candidates = profiles.filter(
-    (p) => p.kind === "api" && normalizeBaseUrl(p.provider?.baseUrl ?? "") === wantedUrl
+    (p) =>
+      p.kind === "api" &&
+      p.provider?.wireFormat !== "openaiResponses" &&
+      normalizeBaseUrl(p.provider?.baseUrl ?? "") === wantedUrl
   );
   if (candidates.length <= 1) {
     return candidates[0];
@@ -127,4 +152,9 @@ export function compatGroupIndexes(profiles: readonly AccountProfile[]): Map<str
     }
   }
   return out;
+}
+
+/** True for the addresses the bundled shim can bind to. */
+function isLoopback(normalizedUrl: string): boolean {
+  return /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?/i.test(normalizedUrl);
 }

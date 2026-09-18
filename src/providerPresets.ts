@@ -29,6 +29,11 @@ export interface ProviderPreset {
   subagentModel?: string;
   /** Vendor-recommended extra env vars. */
   extraEnv?: Record<string, string>;
+  /**
+   * Set to `openaiResponses` for endpoints that never expose `/v1/messages`. Claude Code is then
+   * pointed at the built-in loopback shim instead of at the endpoint directly.
+   */
+  wireFormat?: "anthropic" | "openaiResponses";
   /** Where the user gets a key. */
   keyUrl?: string;
   docsUrl?: string;
@@ -123,6 +128,35 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     keyUrl: "https://platform.minimax.io",
     docsUrl: "https://platform.minimax.io/docs/token-plan/claude-code",
     hint: "Use .cn inside mainland China, .io elsewhere.",
+  },
+  {
+    id: "openaiRelay",
+    label: "OpenAI-format relay / Codex gateway (through the built-in shim)",
+    // Blank for the same reason as `relay` above: these are personal endpoints, entered in the
+    // wizard rather than committed here.
+    baseUrl: "",
+    authStyle: "authToken",
+    wireFormat: "openaiResponses",
+    models: [
+      "gpt-6-astra",
+      "gpt-6",
+      "gpt-5.6",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.3-codex-spark",
+    ],
+    modelNotes: {
+      "gpt-6-astra":
+        "measured: real reasoning; effort low/medium/high all work, none/minimal rejected upstream",
+    },
+    hint:
+      "For gateways that only expose /v1/responses (Codex relays). Requests go through a loopback " +
+      "shim that converts Anthropic <-> Responses and carries encrypted reasoning across turns, so " +
+      "the endpoint URL and key stay out of settings.json. Enter the base with or without /v1.",
   },
   {
     id: "relay",

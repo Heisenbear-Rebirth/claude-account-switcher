@@ -288,6 +288,7 @@ function buildConfig(
     haikuModel: preset.haikuModel ?? main,
     subagentModel: preset.subagentModel ?? preset.haikuModel ?? main,
     extraEnv: preset.extraEnv ? { ...preset.extraEnv } : undefined,
+    wireFormat: preset.wireFormat,
   };
 }
 
