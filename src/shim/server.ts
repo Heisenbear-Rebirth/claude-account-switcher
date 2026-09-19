@@ -172,7 +172,8 @@ export class OpenAiShim {
     const request = buildResponsesRequest(body, {
       model,
       store: this.store,
-      defaultEffort: effort ?? target.defaultEffort,
+      effortOverride: effort,
+      defaultEffort: target.defaultEffort,
       reasoningSummary: target.reasoningSummary ?? "auto",
     });
 

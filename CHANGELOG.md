@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.2
+
+- **Fixed: the effort you set was never reaching an OpenAI-format endpoint.** The shim read the
+  effort from `thinking.budget_tokens`, which Claude Code 2.1.x does not send. Captured from a real
+  2.1.221 client, the level lives in `output_config.effort` and `thinking` is a constant
+  `{type:"adaptive", display:"omitted"}` at every setting — so every request went upstream at the
+  fallback, `medium`. Since Claude Code's own default is `high`, these profiles were quietly
+  thinking *less* than expected, and changing the setting did nothing at all. The four levels
+  (`low`/`medium`/`high`/`xhigh`) now pass through unchanged.
+- **`model@effort` is an explicit override.** Appending a level to the model — `gpt-6-astra@max` —
+  now wins over what the client asked for, which is the only way to reach `max`: Claude Code's own
+  ladder stops at `xhigh`. Precedence is pin, then client, then the profile default.
+
 ## 0.4.1
 
 - **Fixed: a shim profile stopped working after the reload the switch asks for.** Switching wrote

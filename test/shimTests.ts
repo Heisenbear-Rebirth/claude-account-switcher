@@ -3,6 +3,7 @@ import { ReasoningStore, prefixFingerprints } from "../src/shim/reasoningStore";
 import {
   buildResponsesRequest,
   effortFor,
+  normalizeEffort,
   toResponsesInput,
   toResponsesTools,
   toResponsesToolChoice,
@@ -258,11 +259,51 @@ function requestTranslationTests(check: Check): void {
   }
 
   {
+    // What a real Claude Code 2.1.221 request looks like: the level is in output_config, and
+    // `thinking` is the same constant at every setting.
+    const asClaudeCode = (effort: string) => ({
+      model: "m",
+      messages: [],
+      thinking: { type: "adaptive" as const, display: "omitted" },
+      output_config: { effort },
+    });
+    check("the client's stated effort is honoured", effortFor(asClaudeCode("xhigh")) === "xhigh");
+    check("a low setting reaches the upstream", effortFor(asClaudeCode("low")) === "low");
+    check(
+      "Claude Code's default of high is not downgraded",
+      effortFor(asClaudeCode("high")) === "high"
+    );
+    check(
+      "a constant adaptive thinking block does not pin the level",
+      effortFor(asClaudeCode("low")) !== effortFor(asClaudeCode("xhigh"))
+    );
+    check(
+      "an unknown level is ignored rather than forwarded",
+      effortFor({ model: "m", messages: [], output_config: { effort: "turbo" } }, "medium") === "medium"
+    );
+    check(
+      "a model@effort pin overrides the client",
+      effortFor(asClaudeCode("low"), "medium", "max") === "max"
+    );
+
     check("thinking disabled floors effort at low", effortFor({ model: "m", messages: [], thinking: { type: "disabled" } }) === "low");
     check("4k budget maps to low", effortFor({ model: "m", messages: [], thinking: { type: "enabled", budget_tokens: 4096 } }) === "low");
     check("12k budget maps to medium", effortFor({ model: "m", messages: [], thinking: { type: "enabled", budget_tokens: 12000 } }) === "medium");
     check("32k budget maps to high", effortFor({ model: "m", messages: [], thinking: { type: "enabled", budget_tokens: 32000 } }) === "high");
     check("a missing budget uses the fallback", effortFor({ model: "m", messages: [] }, "high") === "high");
+    check(
+      "output_config wins over a budget when both are present",
+      effortFor({ model: "m", messages: [], thinking: { type: "enabled", budget_tokens: 1000 }, output_config: { effort: "xhigh" } }) === "xhigh"
+    );
+
+    check("normalizeEffort accepts max", normalizeEffort("MAX") === "max");
+    check("normalizeEffort rejects nonsense", normalizeEffort("enormous") === undefined);
+
+    const req = buildResponsesRequest(
+      { model: "gpt-6-astra", messages: [user("hi")], thinking: { type: "adaptive" }, output_config: { effort: "xhigh" } },
+      { model: "gpt-6-astra", store: new ReasoningStore() }
+    );
+    check("the built request carries the stated effort", req.reasoning.effort === "xhigh");
   }
 
   {

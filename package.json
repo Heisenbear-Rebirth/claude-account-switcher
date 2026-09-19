@@ -2,7 +2,7 @@
   "name": "claude-code-multi-provider-switcher",
   "displayName": "Claude Multi-Provider Switcher",
   "description": "Switch Claude Code between subscription accounts AND third-party API providers (DeepSeek, OpenRouter, Kimi, GLM, Qwen, MiniMax, Ollama, ...), each with its own API key and models.",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "publisher": "Heisenbear-Rebirth",
   "author": {
     "name": "Heisenbear-Rebirth"

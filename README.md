@@ -153,6 +153,19 @@ address and a token that is worthless anywhere else. Conversation compatibility 
 real upstream, so two different relays behind the same local port are never treated as
 interchangeable mid-conversation.
 
+### Reasoning effort
+
+Claude Code states its effort in `output_config.effort` — `low`, `medium`, `high` or `xhigh`,
+defaulting to `high` — and sends a constant `thinking: {type:"adaptive"}` alongside it, identical at
+every level. (Worth knowing if you ever wire up something similar: reading the thinking budget, as
+the obvious implementation does, silently pins one level forever.) The bridge forwards those four
+levels to the upstream unchanged.
+
+The upstream ladder has one more rung, `max`, that Claude Code cannot ask for. To pin it, append the
+level to the model name in the profile — `gpt-6-astra@max`. An explicit pin like that overrides the
+client; without one, what you set in Claude Code wins, and the profile's own default applies only
+when neither says anything.
+
 ### Transient failures are retried
 
 A gateway sharing one account pool between users fails intermittently in ways a direct API does not

@@ -71,7 +71,17 @@ export interface AnthropicRequest {
   tool_choice?: { type: string; name?: string };
   max_tokens?: number;
   stream?: boolean;
-  thinking?: { type: "enabled" | "disabled"; budget_tokens?: number };
+  /**
+   * `enabled` carries an explicit `budget_tokens`; `adaptive` (what Claude Code 2.1.x sends) leaves
+   * the amount to the model and puts the level in `output_config.effort` instead.
+   */
+  thinking?: { type: "enabled" | "disabled" | "adaptive"; budget_tokens?: number; display?: string };
+  /**
+   * Where Claude Code expresses its effort setting. Captured from a real 2.1.221 client: the body
+   * carries `output_config: { effort: "low" | "medium" | "high" | "xhigh" }`, defaulting to `high`,
+   * and `thinking` stays byte-identical across every level — so this is the only signal there is.
+   */
+  output_config?: { effort?: string };
   metadata?: Record<string, unknown>;
 }
 

@@ -22,7 +22,12 @@ export interface TranslateOptions {
   /** Upstream model id, after any `provider:model@effort` decoration has been stripped. */
   model: string;
   store: ReasoningStore;
-  /** Effort to request when the client did not imply one. */
+  /**
+   * Explicit pin from a `model@effort` suffix. Overrides the client, because it is the only way to
+   * ask for a level the client cannot express — `max`, which Claude Code's own ladder stops short of.
+   */
+  effortOverride?: ReasoningEffort;
+  /** Used only when neither a pin nor the client says anything. */
   defaultEffort?: ReasoningEffort;
   /** Set when the caller wants reasoning summaries surfaced as Anthropic thinking blocks. */
   reasoningSummary?: "auto" | "detailed" | "concise";
@@ -55,7 +60,7 @@ export function buildResponsesRequest(
     tool_choice: toResponsesToolChoice(body.tool_choice),
     parallel_tool_calls: false,
     reasoning: {
-      effort: effortFor(body, opts.defaultEffort),
+      effort: effortFor(body, opts.defaultEffort, opts.effortOverride),
       ...(opts.reasoningSummary ? { summary: opts.reasoningSummary } : {}),
     },
     // `store: false` keeps the upstream stateless, which is what makes `encrypted_content` the
@@ -259,31 +264,61 @@ export function systemText(system: AnthropicRequest["system"]): string | undefin
 }
 
 /**
- * Maps Claude Code's thinking budget onto an effort level.
+ * Resolves the reasoning effort to request upstream.
  *
- * Thresholds follow Claude Code's own presets: `/effort` low is 4k, medium 12k, high 32k. Upstreams
- * that reject `minimal` (gpt-6-astra does, with a genuine OpenAI 400) are handled by never going
- * below `low` unless thinking is switched off entirely.
+ * Precedence: an explicit `model@effort` pin, then whatever the client asked for, then the profile's
+ * default. Claude Code 2.1.x states its level in `output_config.effort` and sends a *constant*
+ * `thinking: {type:"adaptive"}` regardless — verified by capturing real requests across every
+ * setting — so reading the budget alone would silently pin one level for every conversation.
+ * `budget_tokens` is still honoured for clients that send it (SDK callers, older versions).
  */
 export function effortFor(
   body: AnthropicRequest,
-  fallback: ReasoningEffort = "medium"
+  fallback: ReasoningEffort = "medium",
+  override?: ReasoningEffort
 ): ReasoningEffort {
+  if (override) {
+    return override;
+  }
+
+  const stated = normalizeEffort(body.output_config?.effort);
+  if (stated) {
+    return stated;
+  }
+
   if (body.thinking?.type === "disabled") {
     return "low";
   }
+
+  // Thresholds follow Claude Code's documented budgets for its own ladder.
   const budget = body.thinking?.budget_tokens;
-  if (typeof budget !== "number" || budget <= 0) {
-    return fallback;
+  if (typeof budget === "number" && budget > 0) {
+    if (budget <= 4096) {
+      return "low";
+    }
+    if (budget <= 16000) {
+      return "medium";
+    }
+    if (budget <= 40000) {
+      return "high";
+    }
+    return "xhigh";
   }
-  if (budget <= 4096) {
-    return "low";
-  }
-  if (budget <= 16000) {
-    return "medium";
-  }
-  if (budget <= 40000) {
-    return "high";
-  }
-  return "xhigh";
+
+  return fallback;
+}
+
+const EFFORT_LEVELS: readonly ReasoningEffort[] = [
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+/** Accepts a level only if the upstream ladder has it; an unknown word must not reach the API. */
+export function normalizeEffort(value: string | undefined): ReasoningEffort | undefined {
+  const v = value?.trim().toLowerCase();
+  return v && (EFFORT_LEVELS as readonly string[]).includes(v) ? (v as ReasoningEffort) : undefined;
 }
