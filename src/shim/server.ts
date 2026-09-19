@@ -30,13 +30,19 @@ export interface ShimEndpoint {
   token: string;
 }
 
+/** The part of a published endpoint that can be re-adopted after a restart. */
+export interface ShimEndpointParts {
+  port: number;
+  token: string;
+}
+
 const EFFORTS: ReasoningEffort[] = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 export class OpenAiShim {
   private server?: http.Server;
   private target?: ShimTarget;
   private readonly store = new ReasoningStore();
-  private readonly token = crypto.randomBytes(24).toString("base64url");
+  private token = crypto.randomBytes(24).toString("base64url");
   private port = 0;
 
   constructor(private readonly log: (msg: string) => void = () => undefined) {}
@@ -57,27 +63,45 @@ export class OpenAiShim {
   }
 
   /** Starts if needed and points at `target`. The one call a switch needs. */
-  async ensure(target: ShimTarget): Promise<ShimEndpoint> {
-    const endpoint = await this.start();
+  async ensure(target: ShimTarget, adopt?: Partial<ShimEndpointParts>): Promise<ShimEndpoint> {
+    const endpoint = await this.start(adopt);
     this.setTarget(target);
     return endpoint;
   }
 
-  /** Starts on an OS-assigned loopback port. Idempotent. */
-  async start(): Promise<ShimEndpoint> {
+  /**
+   * Starts listening on loopback. Idempotent.
+   *
+   * `adopt` asks for a specific port and token — the pair already written into settings.json by an
+   * earlier switch. Reusing them is what lets a window reload keep working: Claude Code reads that
+   * file at launch, and a reload is exactly what a switch asks the user to do, so coming back on a
+   * fresh random port would strand the endpoint it had just published. If the port is taken by
+   * something else the caller is told the real one and has to republish.
+   */
+  async start(adopt?: Partial<ShimEndpointParts>): Promise<ShimEndpoint> {
     if (this.server && this.port) {
       return this.endpoint!;
+    }
+    if (adopt?.token) {
+      this.token = adopt.token;
     }
     const server = http.createServer((req, res) => {
       this.route(req, res).catch((err) => {
         this.fail(res, 500, describe(err));
       });
     });
+
     // Loopback only: this port accepts requests carrying a provider credential.
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(0, "127.0.0.1", () => resolve());
-    });
+    const wanted = adopt?.port && adopt.port > 0 ? adopt.port : 0;
+    let bound = await listen(server, wanted);
+    if (!bound && wanted !== 0) {
+      this.log(`port ${wanted} unavailable, falling back to an ephemeral port`);
+      bound = await listen(server, 0);
+    }
+    if (!bound) {
+      throw new Error("could not bind a loopback port for the shim");
+    }
+
     const addr = server.address();
     this.port = typeof addr === "object" && addr ? addr.port : 0;
     this.server = server;
@@ -421,4 +445,28 @@ function isTransient(status: number): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Binds one port, resolving false rather than throwing so a fallback can be tried. */
+function listen(server: http.Server, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const onError = () => {
+      server.removeListener("listening", onListening);
+      resolve(false);
+    };
+    const onListening = () => {
+      server.removeListener("error", onError);
+      resolve(true);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+/** Pulls the port out of a loopback base URL this shim previously published. */
+export function portFromLoopback(baseUrl: string | undefined): number | undefined {
+  const m = /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)\/?$/i.exec((baseUrl ?? "").trim());
+  const port = m ? Number(m[1]) : 0;
+  return port > 0 && port < 65536 ? port : undefined;
 }

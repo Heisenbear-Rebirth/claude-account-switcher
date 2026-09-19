@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.1
+
+- **Fixed: a shim profile stopped working after the reload the switch asks for.** Switching wrote
+  `http://127.0.0.1:<port>` into `settings.json` and then prompted for a window reload — which tore
+  the listener down. Nothing restarted it, and both the port and the token were freshly randomised
+  each time, so Claude Code launched against an endpoint that no longer existed and no request could
+  even begin. The shim now re-adopts the exact port and token `settings.json` publishes, so a reload
+  brings the same endpoint back; if that port has been taken meanwhile, the file is rewritten and you
+  are told to reload once more.
+
 ## 0.4.0
 
 - **OpenAI-format endpoints.** Some gateways never expose Anthropic's `/v1/messages` at all — a

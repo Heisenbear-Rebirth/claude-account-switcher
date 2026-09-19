@@ -28,7 +28,7 @@ import { ProfileActivityRegistry } from "./profileActivity";
 import { SwitchService } from "./switchService";
 import { AccountsViewProvider } from "./ui/accountsView";
 import { StatusBarController } from "./ui/statusBar";
-import { OpenAiShim } from "./shim/server";
+import { OpenAiShim, portFromLoopback } from "./shim/server";
 import { UsagePoller } from "./usage";
 import { AccountProfile, ClaudeAuthIdentity } from "./types";
 import { WarmupService } from "./warmup";
@@ -699,11 +699,71 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
 
+  /**
+   * Brings the loopback shim back up after a window reload.
+   *
+   * Switching to a shim profile writes `http://127.0.0.1:<port>` into settings.json and then asks
+   * for a reload — which tears the listener down. Without this, the endpoint Claude Code reads at
+   * launch points at nothing and no request can even start. settings.json is the authority here: we
+   * re-adopt the exact port and token it publishes, and only rewrite it if that port is taken.
+   */
+  const restorePinnedShim = async () => {
+    let env: Record<string, string>;
+    try {
+      env = claudeSettings.readEnv();
+    } catch {
+      return;
+    }
+    const port = portFromLoopback(env.ANTHROPIC_BASE_URL);
+    const token = env.ANTHROPIC_AUTH_TOKEN;
+    if (!port || !token) {
+      return;
+    }
+    const profile = store.list().find((p) => p.id === store.getActiveId());
+    if (profile?.provider?.wireFormat !== "openaiResponses") {
+      return;
+    }
+    const apiKey = await store.getApiKey(profile.id);
+    if (!apiKey) {
+      shimLog.appendLine(`cannot restore "${profile.label}": no API key stored`);
+      return;
+    }
+
+    try {
+      const endpoint = await shim.ensure(
+        {
+          baseUrl: profile.provider.baseUrl,
+          apiKey,
+          fallbackModel: profile.provider.model,
+          defaultEffort: profile.provider.defaultEffort,
+        },
+        { port, token }
+      );
+      if (endpoint.baseUrl === env.ANTHROPIC_BASE_URL) {
+        return;
+      }
+      // The old port was taken, so the published endpoint is stale and has to be replaced.
+      claudeSettings.applyEnv({ ANTHROPIC_BASE_URL: endpoint.baseUrl }, []);
+      shimLog.appendLine(`republished endpoint as ${endpoint.baseUrl}; reload again to pick it up`);
+      void vscode.window.showWarningMessage(
+        `The local shim port moved to ${endpoint.baseUrl}. Reload the window so Claude Code uses it.`,
+        "Reload now"
+      ).then((pick) => {
+        if (pick === "Reload now") {
+          void vscode.commands.executeCommand("workbench.action.reloadWindow");
+        }
+      });
+    } catch (e) {
+      shimLog.appendLine(`shim restore failed: ${(e as Error).message}`);
+    }
+  };
+
   void synchronizeCurrentProfile()
     .catch(() => undefined)
     .then(async () => {
       refreshUI();
       poller.start();
+      await restorePinnedShim().catch(() => undefined);
       await offerUpstreamImport().catch(() => undefined);
     });
 }

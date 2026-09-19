@@ -13,7 +13,13 @@ import {
   SseSink,
   splitInputTokenUsage,
 } from "../src/shim/translateStream";
-import { OpenAiShim, normalizeBase, splitModel, sseData } from "../src/shim/server";
+import {
+  OpenAiShim,
+  normalizeBase,
+  portFromLoopback,
+  splitModel,
+  sseData,
+} from "../src/shim/server";
 import { compatKey, findProfileForEnv } from "../src/compat";
 import { AccountProfile } from "../src/types";
 import { AnthropicMessage, ReasoningItem } from "../src/shim/wire";
@@ -40,6 +46,7 @@ export async function runShimTests(check: Check): Promise<void> {
   serverUnitTests(check);
   await endToEndTests(check);
   await retryTests(check);
+  await adoptionTests(check);
 }
 
 // ── ReasoningStore ─────────────────────────────────────────────────────────
@@ -649,4 +656,65 @@ async function retryTests(check: Check): Promise<void> {
 /** Mirrors the shim's own predicate; kept here so the intent is asserted, not just the behaviour. */
 function isTransientStatus(status: number): boolean {
   return status === 408 || status === 429 || (status >= 500 && status <= 504);
+}
+
+// ── surviving a window reload ──────────────────────────────────────────────
+
+async function adoptionTests(check: Check): Promise<void> {
+  console.log("Shim / endpoint adoption:");
+
+  check("a 127.0.0.1 URL yields its port", portFromLoopback("http://127.0.0.1:41234") === 41234);
+  check("localhost is accepted", portFromLoopback("http://localhost:5000") === 5000);
+  check("a trailing slash is tolerated", portFromLoopback("http://127.0.0.1:41234/") === 41234);
+  check("a remote host is rejected", portFromLoopback("https://api.deepseek.com/anthropic") === undefined);
+  check("a loopback URL with no port is rejected", portFromLoopback("http://127.0.0.1") === undefined);
+  check("an empty value is rejected", portFromLoopback(undefined) === undefined);
+
+  // Find a port that is genuinely free, then hand it to the shim the way settings.json would.
+  const scout = http.createServer();
+  await new Promise<void>((r) => scout.listen(0, "127.0.0.1", () => r()));
+  const freePort = (scout.address() as { port: number }).port;
+  await new Promise<void>((r) => scout.close(() => r()));
+
+  const first = new OpenAiShim();
+  try {
+    const ep = await first.start({ port: freePort, token: "published-token" });
+    check("the requested port is adopted", ep.baseUrl === `http://127.0.0.1:${freePort}`);
+    check("the published token is adopted", ep.token === "published-token");
+
+    // A second shim asking for the same port must not silently share it.
+    const second = new OpenAiShim();
+    try {
+      const moved = await second.start({ port: freePort, token: "published-token" });
+      check(
+        "a taken port falls back to a different one",
+        moved.baseUrl !== `http://127.0.0.1:${freePort}` && /^http:\/\/127\.0\.0\.1:\d+$/.test(moved.baseUrl)
+      );
+    } finally {
+      await second.stop();
+    }
+  } finally {
+    await first.stop();
+  }
+
+  // Restarting on the same published pair is what makes a reload survivable.
+  const again = new OpenAiShim();
+  try {
+    const ep = await again.start({ port: freePort, token: "published-token" });
+    check(
+      "the same endpoint comes back after a restart",
+      ep.baseUrl === `http://127.0.0.1:${freePort}` && ep.token === "published-token"
+    );
+  } finally {
+    await again.stop();
+  }
+
+  const fresh = new OpenAiShim();
+  try {
+    const ep = await fresh.start();
+    check("with nothing to adopt an ephemeral port is used", /^http:\/\/127\.0\.0\.1:\d+$/.test(ep.baseUrl));
+    check("a generated token is non-trivial", ep.token.length >= 20);
+  } finally {
+    await fresh.stop();
+  }
 }
